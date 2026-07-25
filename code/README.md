@@ -61,7 +61,15 @@ RTX 3090 (Table 5-6). The full-attention ablation of the same model runs at ~45 
 
 ### 1. Data Collection (CARLA)
 
-Launch CARLA 0.9.14 server, then collect expert demonstrations:
+The privileged expert needs CARLA's own `agents` package (the global route
+planner), which is **not** part of the `carla` pip wheel. Copy it out of the
+simulator once:
+
+```bash
+docker cp carla-2000:/home/carla/PythonAPI/carla/agents ./agents
+```
+
+Launch the CARLA 0.9.14 server (headless is fine), then collect demonstrations:
 
 ```bash
 # Collect 10 routes per town in diverse weather (Sec. 5-1)
@@ -71,7 +79,23 @@ for town in Town01 Town02 Town03 Town04 Town06; do
 done
 ```
 
-This produces `dataset/{Town*}/route_*/rgb/*.jpg`, `lidar/*.npy`, `measurements/*.json`, etc.
+This produces `dataset/{Town*}/route_*/rgb/*.jpg`, `lidar/*.npy`,
+`measurements/*.json`, `bev_seg/*.png`, `depth/*.npy` and a `route.json`
+per route.
+
+### 1b. Build the waypoint labels
+
+Labels are **not** written during collection. They are reconstructed from the
+recorded ego poses, so that they are the trajectory the expert actually drove —
+including braking for a red light and recovering from an injected steering
+perturbation:
+
+```bash
+python -m egca.data.build_labels --root dataset
+```
+
+The dataset loader only uses frames that have a label, so this step is
+mandatory before training.
 
 ### 2. Train EGCA
 

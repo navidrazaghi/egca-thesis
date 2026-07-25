@@ -2,10 +2,15 @@
 
 Each frame directory layout (written by carla_sim/collect_data.py):
     rgb/000123.jpg          stitched 3-camera image 704 x 160
-    lidar/000123.npy        N x 4 point cloud (ego frame)
+    lidar/000123.npy        N x 4 point cloud, float16, cropped to the ROI
     bev_seg/000123.png      128 x 128 uint8 class map
     depth/000123.npy        80 x 352 float16 normalized inverse depth
-    measurements/000123.json  {speed, command, goal_x, goal_y, waypoints[[x,y]*T]}
+    measurements/000123.json  {speed, command, goal_x, goal_y, x, y, yaw, ...}
+    labels/000123.json      {waypoints: [[x, y] * T]}   <- egca/data/build_labels.py
+
+Only frames that have a label file are used: `build_labels.py` deliberately
+leaves the last T frames of every route unlabelled (no future is available) and
+drops frames whose pose log is discontinuous.
 """
 import json
 import os
@@ -32,12 +37,18 @@ class CarlaDrivingDataset(Dataset):
             if not os.path.isdir(tdir):
                 continue
             for route in sorted(os.listdir(tdir)):
-                mdir = os.path.join(tdir, route, "measurements")
-                if not os.path.isdir(mdir):
+                # labels/ is the authoritative frame list (see build_labels.py)
+                ldir = os.path.join(tdir, route, "labels")
+                if not os.path.isdir(ldir):
                     continue
-                for f in sorted(os.listdir(mdir)):
-                    self.frames.append((os.path.join(tdir, route),
-                                        f.split(".")[0]))
+                for f in sorted(os.listdir(ldir)):
+                    if f.endswith(".json"):
+                        self.frames.append((os.path.join(tdir, route),
+                                            f[:-5]))
+        if not synthetic_len and not self.frames:
+            raise RuntimeError(
+                f"no labelled frames under {root} for towns {towns}. "
+                "Did you run: python -m egca.data.build_labels --root <root> ?")
 
     def __len__(self):
         return self.synthetic_len or len(self.frames)
@@ -68,9 +79,11 @@ class CarlaDrivingDataset(Dataset):
         base, fid = self.frames[idx]
         img = cv2.cvtColor(cv2.imread(os.path.join(base, "rgb", fid + ".jpg")),
                            cv2.COLOR_BGR2RGB).astype(np.float32)
-        pts = np.load(os.path.join(base, "lidar", fid + ".npy"))
+        pts = np.load(os.path.join(base, "lidar", fid + ".npy")).astype(np.float32)
         with open(os.path.join(base, "measurements", fid + ".json")) as f:
             meas = json.load(f)
+        with open(os.path.join(base, "labels", fid + ".json")) as f:
+            meas["waypoints"] = json.load(f)["waypoints"]
         seg = cv2.imread(os.path.join(base, "bev_seg", fid + ".png"),
                          cv2.IMREAD_GRAYSCALE).astype(np.int64)
         depth = np.load(os.path.join(base, "depth", fid + ".npy")).astype(np.float32)

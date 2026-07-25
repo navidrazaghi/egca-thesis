@@ -31,14 +31,16 @@ from .weather import TRAIN_WEATHERS, apply_weather
 CONTROL_HZ = 10.0            # simulator / expert control rate
 RECORD_EVERY = 5             # -> 2 Hz recording rate (Table 5-1)
 MAX_ROUTE_SECONDS = 300.0
-NOISE_PROB = 0.05            # fraction of steps with injected steering noise
-NOISE_STD = 0.10             # std of the injected steering perturbation
+MIN_ROUTE_METERS = 800.0     # plan long enough to contain several junctions
+NOISE_PROB = 0.01            # probability of starting a perturbation burst
+NOISE_STEPS = 5              # length of a burst (0.5 s at 10 Hz)
+NOISE_STD = 0.15             # std of the injected steering perturbation
 
 
 class DataCollector:
     def __init__(self, world, vehicle, out_dir):
         self.world, self.vehicle, self.out_dir = world, vehicle, out_dir
-        for d in ["rgb", "lidar", "bev_seg", "depth", "measurements"]:
+        for d in ["rgb", "lidar", "bev_seg", "depth", "measurements", "labels"]:
             os.makedirs(os.path.join(out_dir, d), exist_ok=True)
         self.frame_id = 0
         self.sensor_data = {}
@@ -49,13 +51,20 @@ class DataCollector:
     def _sensor_cb(self, name, data):
         self.sensor_data[name] = data
 
-    def tick(self, expert_out, record=True):
-        """expert_out: (throttle, steer, brake, waypoints_ego, command, goal).
-        The simulator advances every call (CONTROL_HZ), but a frame is written
-        only when `record` is set, which yields the 2 Hz sampling rate of
-        Table 5-1: consecutive 10 Hz frames are almost identical and would
-        merely inflate the dataset with correlated samples."""
-        frame = self.world.tick()
+    def tick(self, control, info, record=True, noise=False):
+        """Advance the simulator one step and optionally write a frame.
+
+        `control` is the (throttle, steer, brake) actually applied and `info` is
+        the expert's side information.  The simulator advances on every call
+        (CONTROL_HZ), but a frame is written only when `record` is set, which
+        yields the 2 Hz sampling rate of Table 5-1: consecutive 10 Hz frames are
+        almost identical and would only inflate the dataset with correlated
+        samples.
+
+        The ego pose is logged with every recorded frame; the waypoint labels are
+        reconstructed from those poses afterwards by `build_labels.py`.
+        """
+        self.world.tick()
         while len(self.sensor_data) < self.n_sensors:   # wait for all sensors
             time.sleep(0.01)
         if not record:
@@ -65,27 +74,58 @@ class DataCollector:
                 for n in ["cam_left", "cam_front", "cam_right"]
                 if n in self.sensor_data}
         strip = stitch_cameras(imgs)
-        lidar = carla_lidar_to_array(self.sensor_data["lidar"])
+        lidar = self._compress_lidar(carla_lidar_to_array(self.sensor_data["lidar"]))
+        tf = self.vehicle.get_transform()
         v = self.vehicle.get_velocity()
-        speed = np.linalg.norm([v.x, v.y, v.z])
+        speed = float(np.linalg.norm([v.x, v.y, v.z]))
         # privileged ground truth for the auxiliary heads
         bev_seg = self._render_bev_seg()
         depth = self._render_depth()
         fid = f"{self.frame_id:06d}"
         cv2.imwrite(os.path.join(self.out_dir, "rgb", fid + ".jpg"),
-                    cv2.cvtColor(strip, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    cv2.cvtColor(strip, cv2.COLOR_RGB2BGR),
+                    [cv2.IMWRITE_JPEG_QUALITY, 90])
         np.save(os.path.join(self.out_dir, "lidar", fid + ".npy"), lidar)
         cv2.imwrite(os.path.join(self.out_dir, "bev_seg", fid + ".png"), bev_seg)
         np.save(os.path.join(self.out_dir, "depth", fid + ".npy"),
                 depth.astype(np.float16))
-        _, _, _, wps, command, goal = expert_out
-        meas = {"speed": float(speed), "command": int(command),
-                "goal_x": float(goal[0]), "goal_y": float(goal[1]),
-                "waypoints": wps.tolist()}
+        throttle, steer, brake = control
+        meas = {
+            "speed": speed,
+            "command": int(info["command"]),
+            "goal_x": float(info["goal"][0]), "goal_y": float(info["goal"][1]),
+            # ego pose in world coordinates -> used by build_labels.py
+            "x": float(tf.location.x), "y": float(tf.location.y),
+            "yaw": float(tf.rotation.yaw),
+            # expert action and reasons, kept for analysis and sanity checks
+            "throttle": float(throttle), "steer": float(steer),
+            "brake": float(brake),
+            "target_speed": float(info["target_speed"]),
+            "red_light": bool(info["red_light"]),
+            "stop_sign": bool(info["stop_sign"]),
+            "lead_distance": float(info["lead_distance"]),
+            "noise": bool(noise),
+        }
         with open(os.path.join(self.out_dir, "measurements", fid + ".json"), "w") as f:
             json.dump(meas, f)
         self.frame_id += 1
         self.sensor_data.clear()
+
+    def _compress_lidar(self, pts):
+        """Crop to the BEV region of interest and store as float16.
+
+        Points outside the region are never used by the pillar encoder, and
+        float16 has ~3 mm resolution over a 32 m range -- far below the LiDAR's
+        own noise.  Together this cuts the dataset from ~750 kB to ~150 kB per
+        frame, which keeps 200 k frames inside the page cache of the machine and
+        makes the training loop insensitive to disk latency.
+        """
+        x0, x1 = self.BEV_X
+        y0, y1 = self.BEV_Y
+        m = ((pts[:, 0] >= x0) & (pts[:, 0] < x1)
+             & (pts[:, 1] >= y0) & (pts[:, 1] < y1)
+             & (pts[:, 2] >= -2.5) & (pts[:, 2] < 1.5))
+        return pts[m].astype(np.float16)
 
     # ---- privileged ground truth (uses full simulator state) -------------
     #   class ids: 0 free, 1 road, 2 lane marking, 3 vehicle, 4 pedestrian,
@@ -177,7 +217,8 @@ class DataCollector:
             a.destroy()
 
 
-def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2):
+def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2,
+                  max_seconds=MAX_ROUTE_SECONDS, min_route_m=MIN_ROUTE_METERS):
     world = client.get_world()
     if world.get_map().name.split("/")[-1] != town:
         world = client.load_world(town)
@@ -191,47 +232,85 @@ def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2
     spawn_points = world.get_map().get_spawn_points()
     random.shuffle(spawn_points)
     vehicle = world.spawn_actor(bp, spawn_points[0])
-    time.sleep(0.5)
-    # spawn traffic
+    world.tick()
+    # background traffic under CARLA's own autopilot
     traffic = []
-    for sp in spawn_points[1: int(len(spawn_points) * traffic_density)]:
+    tm = client.get_trafficmanager()
+    tm.set_synchronous_mode(True)
+    for sp in spawn_points[1: max(2, int(len(spawn_points) * traffic_density))]:
         vbp = random.choice(world.get_blueprint_library().filter("vehicle.*"))
         veh = world.try_spawn_actor(vbp, sp)
         if veh:
-            veh.set_autopilot(True)
+            veh.set_autopilot(True, tm.get_port())
             traffic.append(veh)
-    route_pts = spawn_points[: max(20, len(spawn_points) // 4)]
-    random.shuffle(route_pts)
+    # a route long enough to contain several junctions: chain destinations until
+    # the planned length exceeds MIN_ROUTE_METERS
+    targets, expert = [], None
+    for sp in spawn_points[1:9]:                  # at most 8 chained targets
+        targets.append(sp.location)
+        try:
+            expert = PrivilegedExpert(world, vehicle, targets)
+        except (RuntimeError, ValueError, IndexError) as e:
+            print(f"  route planning failed for one target ({e}), retrying")
+            targets.pop()
+            continue
+        if expert.route_length > min_route_m:
+            break
+    if expert is None or expert.route_length < 50.0:
+        print("  could not plan a route, skipping")
+        vehicle.destroy()
+        for t in traffic:
+            t.destroy()
+        return
     out_dir = os.path.join(out_base, f"route_{route_id:03d}_{weather}")
     os.makedirs(out_dir, exist_ok=True)
     collector = DataCollector(world, vehicle, out_dir)
-    expert = PrivilegedExpert(vehicle, route_pts)
-    print(f"collecting {town} route {route_id} weather={weather} ...")
-    steps = 0
-    max_steps = int(MAX_ROUTE_SECONDS * CONTROL_HZ)
-    while steps < max_steps and expert.next_waypoint() is not None:
-        throttle, steer, brake, wps = expert.step(world)
-        # Noise injection (Sec. 5-1): the *applied* steering is perturbed so
-        # that the dataset also covers slightly off-lane states and how the
-        # expert recovers from them, which mitigates covariate shift [14].
-        # The recorded label stays the unperturbed expert trajectory.
+    print(f"collecting {town} route {route_id} weather={weather} "
+          f"({expert.route_length:.0f} m) ...")
+    steps, noise_left, stuck = 0, 0, 0
+    max_stuck = int(60.0 * CONTROL_HZ)            # abort after 60 s without motion
+    max_steps = int(max_seconds * CONTROL_HZ)
+    while steps < max_steps and not expert.done():
+        throttle, steer, brake, info = expert.step()
+        # A permanent traffic deadlock would otherwise burn the whole route
+        # budget; abort and let the next route start.
+        stuck = stuck + 1 if info["progress_delta"] < 1e-4 else 0
+        if stuck > max_stuck:
+            print("  aborting: no progress for 60 s")
+            break
+        # Noise injection (Sec. 5-1): the *applied* steering is perturbed for a
+        # short burst so that the dataset also covers slightly off-lane states
+        # and the recovery from them, which mitigates covariate shift [14].
+        # The label is reconstructed from the real future trajectory, so the
+        # recovery manoeuvre itself becomes the supervision signal.
+        if noise_left == 0 and random.random() < NOISE_PROB:
+            noise_left = NOISE_STEPS
+            noise_mag = random.gauss(0.0, NOISE_STD)
         applied_steer = steer
-        if random.random() < NOISE_PROB:
-            applied_steer = float(np.clip(steer + random.gauss(0.0, NOISE_STD),
-                                          -1.0, 1.0))
+        if noise_left > 0:
+            applied_steer = float(np.clip(steer + noise_mag, -1.0, 1.0))
+            noise_left -= 1
         vehicle.apply_control(carla.VehicleControl(
             throttle=throttle, steer=applied_steer, brake=brake))
-        collector.tick((throttle, steer, brake, wps, expert.nav_command(),
-                        expert.sparse_goal()),
-                       record=(steps % RECORD_EVERY == 0))
+        collector.tick((throttle, applied_steer, brake), info,
+                       record=(steps % RECORD_EVERY == 0),
+                       noise=(noise_left > 0))
         steps += 1
-        if steps % 100 == 0:
-            print(f"  step {steps}")
+        if steps % 200 == 0:
+            print(f"  step {steps}  progress {100 * info['progress']:.0f}%  "
+                  f"frames {collector.frame_id}")
+    meta = {"town": town, "weather": weather, "control_hz": CONTROL_HZ,
+            "record_every": RECORD_EVERY, "frames": collector.frame_id,
+            "route_length_m": expert.route_length,
+            "completed": bool(expert.done())}
+    with open(os.path.join(out_dir, "route.json"), "w") as f:
+        json.dump(meta, f, indent=2)
     collector.cleanup()
     vehicle.destroy()
     for t in traffic:
         t.destroy()
-    print(f"  collected {collector.frame_id} frames")
+    print(f"  collected {collector.frame_id} frames "
+          f"({'completed' if expert.done() else 'timed out'})")
 
 
 def main():
@@ -245,14 +324,21 @@ def main():
     ap.add_argument("--routes", type=int, default=5)
     ap.add_argument("--output", required=True)
     ap.add_argument("--traffic-density", type=float, default=0.2)
+    ap.add_argument("--max-seconds", type=float, default=MAX_ROUTE_SECONDS,
+                    help="per-route time budget; use ~60 for a dry run")
+    ap.add_argument("--min-route-m", type=float, default=MIN_ROUTE_METERS)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--first-route", type=int, default=0,
+                    help="id of the first route (to resume an interrupted run)")
     args = ap.parse_args()
+    random.seed(args.seed)
     client = carla.Client(args.host, args.port)
-    client.set_timeout(10.0)
+    client.set_timeout(60.0)          # loading a town can take a while
     weathers = list(TRAIN_WEATHERS.keys())
-    for route_id in range(args.routes):
+    for route_id in range(args.first_route, args.first_route + args.routes):
         w = weathers[route_id % len(weathers)]
         collect_route(client, args.town, args.output, route_id, w,
-                      args.traffic_density)
+                      args.traffic_density, args.max_seconds, args.min_route_m)
 
 
 if __name__ == "__main__":

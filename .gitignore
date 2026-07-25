@@ -1,4 +1,4 @@
-﻿__pycache__/
+__pycache__/
 *.pyc
 *.pth
 code/checkpoints/
@@ -10,3 +10,5 @@ build_unpacked/
 render/
 *.pdf
 ~$*
+# CARLA's own `agents` package, copied out of the simulator image on the server
+code/agents/
