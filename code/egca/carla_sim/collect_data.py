@@ -217,6 +217,38 @@ class DataCollector:
             a.destroy()
 
 
+def clear_world(world):
+    """Destroy vehicles, walkers and sensors left behind by an interrupted run.
+
+    Without this, a crashed collection leaves its ego vehicle parked on a spawn
+    point (so the next run fails with "collision at spawn position") and its
+    sensors still rendering, silently eating GPU time.
+    """
+    n = 0
+    for a in list(world.get_actors()):
+        if not a.type_id.startswith(("vehicle.", "walker.", "sensor.")):
+            continue
+        try:
+            if a.type_id.startswith("sensor.") and a.is_listening:
+                a.stop()
+            a.destroy()
+            n += 1
+        except RuntimeError:
+            pass
+    if n:
+        print(f"  cleared {n} leftover actors")
+    return n
+
+
+def spawn_ego(world, bp, spawn_points):
+    """Spawn the ego vehicle at the first free point; returns (actor, index)."""
+    for i, sp in enumerate(spawn_points):
+        actor = world.try_spawn_actor(bp, sp)
+        if actor is not None:
+            return actor, i
+    raise RuntimeError("no free spawn point in this town")
+
+
 def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2,
                   max_seconds=MAX_ROUTE_SECONDS, min_route_m=MIN_ROUTE_METERS,
                   tm_port=8000):
@@ -231,14 +263,17 @@ def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2
     settings.fixed_delta_seconds = 1.0 / CONTROL_HZ
     world.apply_settings(settings)
     apply_weather(world, weather)
+    clear_world(world)
+    world.tick()
     bp = world.get_blueprint_library().filter("vehicle.tesla.model3")[0]
     spawn_points = world.get_map().get_spawn_points()
     random.shuffle(spawn_points)
-    vehicle = world.spawn_actor(bp, spawn_points[0])
+    vehicle, ego_i = spawn_ego(world, bp, spawn_points)
+    others = [sp for i, sp in enumerate(spawn_points) if i != ego_i]
     world.tick()
     traffic = []
     try:
-        _drive_route(client, world, vehicle, spawn_points, town, out_base,
+        _drive_route(client, world, vehicle, others, town, out_base,
                      route_id, weather, traffic_density, max_seconds,
                      min_route_m, tm_port, traffic)
     finally:
@@ -263,19 +298,24 @@ def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
     # background traffic under CARLA's own autopilot.  Each simulator instance
     # needs its own Traffic Manager port, otherwise a second instance fails to
     # bind (the TM RPC server lives on the host network).
-    if traffic_density > 0:
+    n_traffic = (max(2, int(len(spawn_points) * traffic_density))
+                 if traffic_density > 0 else 0)
+    if n_traffic:
         tm = client.get_trafficmanager(tm_port)
         tm.set_synchronous_mode(True)
-        for sp in spawn_points[1: max(2, int(len(spawn_points) * traffic_density))]:
+        for sp in spawn_points[:n_traffic]:
             vbp = random.choice(world.get_blueprint_library().filter("vehicle.*"))
             veh = world.try_spawn_actor(vbp, sp)
             if veh:
                 veh.set_autopilot(True, tm.get_port())
                 traffic.append(veh)
+    # Route destinations are taken from spawn points that are *not* used by the
+    # background traffic, so the route does not end on top of a parked car.
+    target_pts = spawn_points[n_traffic:n_traffic + 8] or spawn_points[-8:]
     # a route long enough to contain several junctions: chain destinations until
-    # the planned length exceeds MIN_ROUTE_METERS
+    # the planned length exceeds min_route_m
     targets, expert = [], None
-    for sp in spawn_points[1:9]:                  # at most 8 chained targets
+    for sp in target_pts:
         targets.append(sp.location)
         try:
             expert = PrivilegedExpert(world, vehicle, targets)
@@ -353,9 +393,10 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--first-route", type=int, default=0,
                     help="id of the first route (to resume an interrupted run)")
-    ap.add_argument("--tm-port", type=int, default=8000,
+    ap.add_argument("--tm-port", type=int, default=8100,
                     help="Traffic Manager RPC port; must differ per simulator "
-                         "instance when several run in parallel")
+                         "instance when several run in parallel (CARLA's own "
+                         "default of 8000 is often already taken on a server)")
     args = ap.parse_args()
     random.seed(args.seed)
     client = carla.Client(args.host, args.port)
