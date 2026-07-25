@@ -33,10 +33,13 @@ except ImportError:                                   # pragma: no cover
 
 KINDS = ("pedestrian_crossing", "lead_brake", "junction_violation")
 
-ARM_DIST = 60.0        # start staging the scenario at this distance (m)
-TRIGGER_DIST = 14.0    # fire it when the ego is this close (m)
-DURATION_S = 8.0       # how long the scripted action lasts
-WALKER_SPEED = 1.6     # m/s of the crossing pedestrian
+ARM_DIST = 60.0            # start staging the scenario at this distance (m)
+TRIGGER_DIST = 14.0        # fire it when the ego is this close (m)
+LEAD_TRIGGER_DIST = 13.0   # ... or this close to the lead vehicle itself
+STAGE_TIMEOUT_S = 20.0     # a staged scenario that never fires is cancelled
+DURATION_S = 8.0           # how long the scripted action lasts
+WALKER_SPEED = 1.6         # m/s of the crossing pedestrian
+LEAD_CRUISE = 0.45         # throttle of the lead vehicle before it brakes
 BRAKE_STRENGTH = 1.0
 
 
@@ -58,6 +61,9 @@ class _Scenario:
         self.actors = []
         self.state = "pending"              # pending -> staged -> running -> done
         self.timer = 0.0
+        self.staged_for = 0.0
+        self.vehicle = None
+        self.walker = None
 
     # ------------------------------------------------------------- staging
     def stage(self):
@@ -147,6 +153,40 @@ class _Scenario:
         self.vehicle = veh
         return True
 
+    # -------------------------------------------------------------- waiting
+    def hold(self, dt):
+        """Called on every step while the scenario is staged but not yet fired.
+
+        The lead vehicle has to keep rolling.  Staged motionless it is simply a
+        wall in the ego lane: the ego stops behind it, therefore never gets close
+        enough to trigger anything, and the two wait for each other until the
+        route is aborted -- which is precisely what the first version did (three
+        of three routes lost, zero scenarios fired).
+        """
+        self.staged_for += dt
+        if self.kind == "lead_brake" and self.vehicle is not None:
+            try:
+                self.vehicle.apply_control(
+                    carla.VehicleControl(throttle=LEAD_CRUISE))
+            except RuntimeError:
+                self.state = "done"
+
+    def ready(self, ego_loc, gap_along_route):
+        """Whether the trigger condition is met.  The lead-brake event triggers
+        on the distance to the vehicle itself, since that vehicle is moving and
+        its position no longer matches the planned trigger point."""
+        if self.kind == "lead_brake" and self.vehicle is not None:
+            try:
+                loc = self.vehicle.get_location()
+            except RuntimeError:
+                return False
+            return math.hypot(loc.x - ego_loc.x,
+                              loc.y - ego_loc.y) < LEAD_TRIGGER_DIST
+        return gap_along_route < TRIGGER_DIST
+
+    def expired(self):
+        return self.staged_for > STAGE_TIMEOUT_S
+
     # -------------------------------------------------------------- acting
     def fire(self):
         self.state = "running"
@@ -174,6 +214,18 @@ class _Scenario:
         if self.timer > DURATION_S:
             self.state = "done"
 
+    def retire(self, tm_port):
+        """Hand the scenario vehicle back to the autopilot instead of deleting it
+        in front of the camera: a car vanishing mid-frame is an artefact that
+        would end up in the training images."""
+        if self.vehicle is not None:
+            try:
+                self.vehicle.set_autopilot(True, tm_port)
+                return True
+            except RuntimeError:
+                pass
+        return False
+
     def cleanup(self):
         for a in self.actors:
             try:
@@ -187,12 +239,14 @@ class ScriptedScenarios:
     """Places scenarios along a route and drives them as the ego passes by."""
 
     def __init__(self, world, vehicle, plan, cum, every_m=120.0, rng=None,
-                 kinds=KINDS, carla_map=None):
+                 kinds=KINDS, carla_map=None, tm_port=8100):
         self.world = world
         self.vehicle = vehicle
         self.plan = plan
         self.cum = cum
         self.rng = rng or random
+        self.tm_port = tm_port
+        self.retired = []
         # fetched once; see the note in _Scenario
         self.map = carla_map or world.get_map()
         self.bl = world.get_blueprint_library()
@@ -221,10 +275,17 @@ class ScriptedScenarios:
 
     def tick(self, ego_idx, dt):
         """Advance the scenario state machine; returns the active kind or None."""
+        try:
+            ego_loc = self.vehicle.get_location()
+        except RuntimeError:
+            return None
         if self.active is not None:
             self.active.act(dt)
             if self.active.state == "done":
-                self.active.cleanup()
+                if self.active.retire(self.tm_port):
+                    self.retired.append(self.active)   # destroyed at route end
+                else:
+                    self.active.cleanup()
                 self.active = None
             else:
                 return self.active.kind
@@ -237,17 +298,24 @@ class ScriptedScenarios:
             elif sc.state == "pending" and gap < ARM_DIST:
                 if not sc.stage():
                     self.pending.remove(sc)
-            elif sc.state == "staged" and gap < TRIGGER_DIST:
-                sc.fire()
-                self.pending.remove(sc)
-                self.active = sc
-                self.fired.append((sc.kind, sc.idx))
-                return sc.kind
+            elif sc.state == "staged":
+                sc.hold(dt)
+                if sc.ready(ego_loc, gap):
+                    sc.fire()
+                    self.pending.remove(sc)
+                    self.active = sc
+                    self.fired.append((sc.kind, sc.idx))
+                    return sc.kind
+                if sc.expired() or sc.state == "done":
+                    # it never became reachable; remove it rather than let it
+                    # stand in the road and deadlock the route
+                    sc.cleanup()
+                    self.pending.remove(sc)
         return None
 
     def cleanup(self):
         if self.active is not None:
             self.active.cleanup()
-        for sc in self.pending:
+        for sc in self.pending + self.retired:
             sc.cleanup()
-        self.pending, self.active = [], None
+        self.pending, self.active, self.retired = [], None, []
