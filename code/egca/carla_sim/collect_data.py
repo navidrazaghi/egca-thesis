@@ -41,7 +41,7 @@ STUCK_SECONDS = 25.0         # abandon a gridlocked route instead of recording i
 # run produced 8 usable frames out of 120), while a fixed low value never
 # exercises car following.
 DENSITY_RANGE = (0.10, 0.30)
-MIN_USEFUL_FRAMES = 40       # below this a route is discarded and retried
+MIN_USEFUL_FRAMES = 40       # *moving* frames below which a route is retried
 MAX_ROUTE_ATTEMPTS = 3
 NOISE_PROB = 0.01            # probability of starting a perturbation burst
 NOISE_STEPS = 5              # length of a burst (0.5 s at 10 Hz)
@@ -54,6 +54,7 @@ class DataCollector:
         for d in ["rgb", "lidar", "bev_seg", "depth", "measurements", "labels"]:
             os.makedirs(os.path.join(out_dir, d), exist_ok=True)
         self.frame_id = 0
+        self.moving_frames = 0
         self.sensor_data = {}
         self.actors = spawn_rig(world, vehicle, self._sensor_cb, with_depth=True)
         self.n_sensors = 3 + 3 + 3   # 3 RGB + 3 depth + lidar/imu/gnss
@@ -124,6 +125,8 @@ class DataCollector:
         with open(os.path.join(self.out_dir, "measurements", fid + ".json"), "w") as f:
             json.dump(meas, f)
         self.frame_id += 1
+        if speed > 0.5:
+            self.moving_frames += 1
         self.sensor_data.clear()
 
     def _compress_lidar(self, pts):
@@ -500,14 +503,17 @@ def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
             "record_every": RECORD_EVERY, "frames": collector.frame_id,
             "route_length_m": expert.route_length,
             "completed": bool(expert.done()),
-            "scenarios_fired": [k for k, _ in scenarios.fired]}
+            "scenarios_fired": [k for k, _ in scenarios.fired],
+            "scenario_failures": scenarios.failures,
+            "moving_frames": collector.moving_frames}
     with open(os.path.join(out_dir, "route.json"), "w") as f:
         json.dump(meta, f, indent=2)
+    print(scenarios.summary())
     scenarios.cleanup()
     collector.cleanup()
     print(f"  collected {collector.frame_id} frames "
           f"({'completed' if expert.done() else 'timed out'})")
-    return collector.frame_id, out_dir
+    return collector.moving_frames, out_dir
 
 
 def main():
@@ -567,7 +573,7 @@ def main():
             if out_dir and os.path.isdir(out_dir):
                 shutil.rmtree(out_dir, ignore_errors=True)
             if attempt < MAX_ROUTE_ATTEMPTS - 1:
-                print(f"  only {frames} frames, retrying route {route_id} "
+                print(f"  only {frames} moving frames, retrying route {route_id} "
                       f"from a different spawn point")
 
 

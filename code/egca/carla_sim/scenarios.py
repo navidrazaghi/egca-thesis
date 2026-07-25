@@ -64,14 +64,22 @@ class _Scenario:
         self.staged_for = 0.0
         self.vehicle = None
         self.walker = None
+        self.reason = ""
 
     # ------------------------------------------------------------- staging
     def stage(self):
-        """Create the actors.  Returns False if the scenario cannot be placed."""
+        """Create the actors.  Returns False if the scenario cannot be placed.
+
+        The failure reason is recorded rather than swallowed: a silently failing
+        stage looks exactly like a scenario that was never scheduled, and that
+        ambiguity cost two debugging rounds.
+        """
         try:
             ok = getattr(self, f"_stage_{self.kind}")()
-        except (RuntimeError, AttributeError, IndexError):
+            self.reason = "" if ok else "no valid placement"
+        except Exception as exc:              # never kill a long collection
             ok = False
+            self.reason = f"{type(exc).__name__}: {exc}"
         self.state = "staged" if ok else "done"
         return ok
 
@@ -247,6 +255,9 @@ class ScriptedScenarios:
         self.rng = rng or random
         self.tm_port = tm_port
         self.retired = []
+        self.staged_ok = 0
+        self.failures = []          # (kind, reason) of every failed staging
+        self.expired_count = 0
         # fetched once; see the note in _Scenario
         self.map = carla_map or world.get_map()
         self.bl = world.get_blueprint_library()
@@ -296,7 +307,10 @@ class ScriptedScenarios:
                 sc.cleanup()
                 self.pending.remove(sc)
             elif sc.state == "pending" and gap < ARM_DIST:
-                if not sc.stage():
+                if sc.stage():
+                    self.staged_ok += 1
+                else:
+                    self.failures.append((sc.kind, sc.reason))
                     self.pending.remove(sc)
             elif sc.state == "staged":
                 sc.hold(dt)
@@ -309,9 +323,23 @@ class ScriptedScenarios:
                 if sc.expired() or sc.state == "done":
                     # it never became reachable; remove it rather than let it
                     # stand in the road and deadlock the route
+                    self.expired_count += 1
                     sc.cleanup()
                     self.pending.remove(sc)
         return None
+
+    def summary(self):
+        """One-line account of what happened to the scheduled scenarios."""
+        why = {}
+        for kind, reason in self.failures:
+            why[f"{kind}: {reason}"] = why.get(f"{kind}: {reason}", 0) + 1
+        parts = [f"fired {len(self.fired)}", f"staged {self.staged_ok}",
+                 f"expired {self.expired_count}",
+                 f"still pending {len(self.pending)}"]
+        if why:
+            parts.append("failed to stage -> "
+                         + "; ".join(f"{k} x{v}" for k, v in why.items()))
+        return "  scenarios: " + ", ".join(parts)
 
     def cleanup(self):
         if self.active is not None:
