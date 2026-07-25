@@ -305,9 +305,18 @@ class PrivilegedExpert:
 
     def _actor_hazard(self, tf, speed):
         """Closest vehicle/pedestrian inside a speed-dependent forward corridor.
-        Returns (distance, speed) of the blocker, or (None, None)."""
-        reach = float(np.clip(4.0 + 1.2 * speed
-                              + speed ** 2 / (2.0 * self.MAX_DECEL), 6.0, 30.0))
+
+        The reach must be clearly larger than the desired following gap,
+        otherwise a leader is first noticed when it is already at the target
+        distance and the car-following law never gets room to act (which is
+        exactly why the first version of this expert never followed anybody).
+
+        Returns (distance, speed) of the blocker and the number of vehicles
+        loosely ahead, the latter purely as a diagnostic.
+        """
+        gap_desired = self.STANDSTILL_GAP + self.HEADWAY * speed
+        reach = float(np.clip(2.0 * gap_desired + 5.0, 12.0, 40.0))
+        n_ahead = 0
         best_d, best_v = None, None
         for act in self.world.get_actors():
             if act.id == self.vehicle.id:
@@ -317,6 +326,8 @@ class PrivilegedExpert:
                 continue
             loc = act.get_location()
             fwd, lat = self._to_ego(loc.x, loc.y, tf)
+            if not is_walker and 0.5 < fwd < 20.0 and abs(lat) < 5.0:
+                n_ahead += 1              # diagnostic: anything loosely ahead
             # Only the actor's half-*width* widens the lateral gate.  Using its
             # half-length (extent.x, ~2.5 m for a car) would inflate the gate to
             # ~4 m and flag oncoming and adjacent-lane traffic as blockers, which
@@ -335,7 +346,7 @@ class PrivilegedExpert:
                 if best_d is None or fwd < best_d:
                     v = act.get_velocity()
                     best_d, best_v = fwd, math.hypot(v.x, v.y)
-        return best_d, best_v
+        return best_d, best_v, n_ahead
 
     # ------------------------------------------------------------------ step
     def step(self):
@@ -356,7 +367,7 @@ class PrivilegedExpert:
                      self._curvature_speed())
         light_d = self._light_distance(speed)
         stop_sign = self._stop_sign_hazard(tf, speed)
-        lead_d, lead_v = self._actor_hazard(tf, speed)
+        lead_d, lead_v, n_ahead = self._actor_hazard(tf, speed)
         if light_d is not None:
             # brake profile that reaches zero STOP_LINE_MARGIN before the line
             target = min(target, math.sqrt(
@@ -405,6 +416,7 @@ class PrivilegedExpert:
             "red_light": bool(red_light),
             "stop_sign": bool(stop_sign),
             "lead_distance": -1.0 if lead_d is None else float(lead_d),
+            "n_ahead": int(n_ahead),
             "progress": self.progress(),
             # advance along the plan since the previous step, used by the
             # collector to detect a permanent deadlock

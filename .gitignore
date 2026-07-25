@@ -12,3 +12,8 @@ render/
 ~$*
 # CARLA's own `agents` package, copied out of the simulator image on the server
 code/agents/
+# collection and inspection output produced on the server
+dryrun*/
+code/dryrun*/
+inspect*/
+code/inspect*/

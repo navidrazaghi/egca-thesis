@@ -58,13 +58,30 @@ def to_ego(x, y, ref):
     return c * dx + s * dy, -(-s * dx + c * dy)
 
 
-def build_route(route, horizon, max_step=25.0):
-    """Write `labels/*.json` for one route; returns (written, skipped, stats)."""
+STOP_THRESHOLD = 0.5      # 2 s path below this counts as standing still (m)
+
+
+def build_route(route, horizon, max_step=25.0, keep_edges=2):
+    """Write `labels/*.json` for one route; returns (written, skipped, stats).
+
+    Standstill resampling (Table 5-1): in a long stop only the beginning and the
+    end carry information -- the decision to brake and the moment of moving off.
+    The frames in the middle are identical to each other and, left in, would make
+    ~40% of the dataset say "stay where you are"; a policy trained on that
+    becomes timid and loses route completion.  `keep_edges` frames are kept at
+    each end of every standstill and the rest are dropped by simply not writing a
+    label (the loader takes `labels/` as the authoritative frame list).
+    """
     fids, poses = load_poses(route)
     ldir = os.path.join(route, "labels")
     os.makedirs(ldir, exist_ok=True)
-    written = skipped = stopped = 0
-    total_len = 0.0
+    for old in os.listdir(ldir):             # rebuild from scratch, idempotent
+        if old.endswith(".json"):
+            os.remove(os.path.join(ldir, old))
+
+    # ---- pass 1: compute the label of every frame that has a future
+    cand = {}
+    skipped = 0
     for i in range(len(fids)):
         if i + horizon >= len(fids):
             skipped += 1                     # no future available at the tail
@@ -80,20 +97,46 @@ def build_route(route, horizon, max_step=25.0):
         if max(steps) > max_step:
             skipped += 1
             continue
+        cand[i] = (wps, sum(steps))
+
+    # ---- pass 2: thin out the interior of every standstill run
+    idxs = sorted(cand)
+    drop = set()
+    run = []
+    for i in idxs + [None]:
+        is_stop = i is not None and cand[i][1] < STOP_THRESHOLD
+        if is_stop:
+            run.append(i)
+            continue
+        if len(run) > 2 * keep_edges:
+            drop.update(run[keep_edges:len(run) - keep_edges])
+        run = []
+
+    written = stopped = 0
+    total_len = 0.0
+    for i in idxs:
+        if i in drop:
+            continue
+        wps, path = cand[i]
         with open(os.path.join(ldir, fids[i] + ".json"), "w") as f:
             json.dump({"waypoints": [[float(a), float(b)] for a, b in wps]}, f)
         written += 1
-        total_len += sum(steps)
-        if sum(steps) < 0.5:                 # the vehicle stood still
+        total_len += path
+        if path < STOP_THRESHOLD:
             stopped += 1
-    return written, skipped, {"mean_path_m": total_len / max(written, 1),
-                              "stopped_frac": stopped / max(written, 1)}
+    return written, skipped + len(drop), {
+        "mean_path_m": total_len / max(written, 1),
+        "stopped_frac": stopped / max(written, 1),
+        "dropped_standstill": len(drop)}
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="dataset")
     ap.add_argument("--horizon", type=int, default=4)
+    ap.add_argument("--keep-edges", type=int, default=2,
+                    help="frames kept at each end of a standstill; use a large "
+                         "value to disable standstill resampling")
     args = ap.parse_args()
     routes = route_dirs(args.root)
     if not routes:
@@ -102,13 +145,14 @@ def main():
     tot_w = tot_s = 0
     path_sum = stop_sum = 0.0
     for r in routes:
-        w, s, st = build_route(r, args.horizon)
+        w, s, st = build_route(r, args.horizon, keep_edges=args.keep_edges)
         tot_w += w
         tot_s += s
         path_sum += st["mean_path_m"] * w
         stop_sum += st["stopped_frac"] * w
-        print(f"{os.path.relpath(r, args.root):50s} "
-              f"labelled {w:6d}  dropped {s:4d}  "
+        print(f"{os.path.relpath(r, args.root):46s} "
+              f"labelled {w:6d}  dropped {s:4d} "
+              f"(standstill {st['dropped_standstill']:4d})  "
               f"mean 2 s path {st['mean_path_m']:5.2f} m  "
               f"stopped {100 * st['stopped_frac']:4.1f}%")
     print("-" * 100)

@@ -104,6 +104,7 @@ class DataCollector:
             "red_light": bool(info["red_light"]),
             "stop_sign": bool(info["stop_sign"]),
             "lead_distance": float(info["lead_distance"]),
+            "n_ahead": int(info.get("n_ahead", 0)),
             "noise": bool(noise),
         }
         with open(os.path.join(self.out_dir, "measurements", fid + ".json"), "w") as f:

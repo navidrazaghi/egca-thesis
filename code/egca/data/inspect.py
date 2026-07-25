@@ -133,7 +133,7 @@ def main():
     n = 0
     # why was the expert slow?  split the frames by the reason it had to brake
     groups = {"red light": [], "stop sign": [], "lead vehicle": [], "free": []}
-    leads = []
+    leads, ahead = [], []
     for r, f in pool:
         with open(os.path.join(r, "measurements", f + ".json")) as fh:
             m = json.load(fh)
@@ -144,6 +144,7 @@ def main():
         red += int(m["red_light"])
         stop += int(m["stop_sign"])
         noise += int(m["noise"])
+        ahead.append(int(m.get("n_ahead", 0)))
         if m["red_light"]:
             groups["red light"].append(m["speed"])
         elif m["stop_sign"]:
@@ -183,6 +184,13 @@ def main():
     if leads:
         print(f"  lead distance when a blocker was seen: mean {np.mean(leads):.1f} m,"
               f" p10 {np.percentile(leads,10):.1f} m")
+    if ahead:
+        print(f"  vehicles loosely ahead (<20 m, |y|<5 m): "
+              f"{100 * np.mean(np.array(ahead) > 0):.1f}% of frames, "
+              f"mean {np.mean(ahead):.2f} per frame")
+        print("  -> if this is clearly above 0% while 'lead vehicle' is 0%, the "
+              "hazard corridor is too narrow; if both are ~0%, there simply was "
+              "no traffic in front and the traffic density should be raised.")
     tot = max(cls_hist.sum(), 1)
     names = ["free", "road", "lane", "vehicle", "pedestrian", "static"]
     print("BEV classes  " + "  ".join(
