@@ -91,6 +91,10 @@ class PrivilegedExpert:
     WALKER_HALF_WIDTH = 1.4    # lateral gate for pedestrians (m)
     WALKER_INTENT_RANGE = 10.0  # within this, a pedestrian heading into our path
                                 # counts even if it is still off the carriageway
+    WALKER_STOP_LAT = 0.9       # a pedestrian within this lateral offset is in
+                                # the path and must be stopped for; further out
+                                # it is passed at reduced speed
+    WALKER_PASS_SPEED = 2.0     # m/s while passing a pedestrian on the road
     STOP_SIGN_MARGIN = 2.0     # slack added to the stop-sign trigger volume (m)
     # car following
     STANDSTILL_GAP = 5.0       # gap kept at zero speed (m)
@@ -383,7 +387,7 @@ class PrivilegedExpert:
         gap_desired = self.STANDSTILL_GAP + self.HEADWAY * speed
         reach = float(np.clip(2.0 * gap_desired + 5.0, 12.0, 40.0))
         n_ahead = 0
-        best_d, best_v, best_is_walker = None, None, False
+        best_d, best_v, best_is_walker, best_lat = None, None, False, 0.0
         for act in self.world.get_actors():
             if act.id == self.vehicle.id:
                 continue
@@ -415,8 +419,8 @@ class PrivilegedExpert:
                 if best_d is None or fwd < best_d:
                     v = act.get_velocity()
                     best_d, best_v = fwd, math.hypot(v.x, v.y)
-                    best_is_walker = is_walker
-        return best_d, best_v, n_ahead, best_is_walker
+                    best_is_walker, best_lat = is_walker, lat
+        return best_d, best_v, n_ahead, best_is_walker, best_lat
 
     # ------------------------------------------------------------------ step
     def step(self):
@@ -437,7 +441,8 @@ class PrivilegedExpert:
                      self._curvature_speed())
         light_d = self._light_distance(speed)
         stop_sign = self._stop_sign_hazard(tf, speed)
-        lead_d, lead_v, n_ahead, lead_is_walker = self._actor_hazard(tf, speed)
+        (lead_d, lead_v, n_ahead,
+         lead_is_walker, lead_lat) = self._actor_hazard(tf, speed)
         if light_d is not None:
             # brake profile that reaches zero STOP_LINE_MARGIN before the line
             target = min(target, math.sqrt(
@@ -446,6 +451,12 @@ class PrivilegedExpert:
         red_light = light_d is not None and light_d < 2.0 * self.STOP_LINE_MARGIN
         if stop_sign:
             target = 0.0
+        elif lead_d is not None and lead_is_walker \
+                and abs(lead_lat) > self.WALKER_STOP_LAT:
+            # A pedestrian on the road but not directly in the path is passed
+            # slowly, not queued behind.  Applying the car-following law to a
+            # walking pedestrian made the expert crawl at 1 m/s indefinitely.
+            target = min(target, self.WALKER_PASS_SPEED)
         elif lead_d is not None:
             # Car-following law: aim for a 1.5 s time headway on top of a 5 m
             # standstill gap.  At the desired gap the target equals the leader's

@@ -36,6 +36,7 @@ MAX_ROUTE_SECONDS = 300.0
 MIN_ROUTE_METERS = 800.0     # plan long enough to contain several junctions
 TRAFFIC_WARMUP_STEPS = 30    # let the spawned traffic disperse before recording
 STUCK_SECONDS = 25.0         # abandon a gridlocked route instead of recording it
+STUCK_DISTANCE_M = 2.0       # movement that resets the deadlock timer
 # Traffic density is drawn per route from this range.  A single fixed value is
 # both unrealistic and risky: 0.4 gridlocks a small town such as Town01 (one dry
 # run produced 8 usable frames out of 120), while a fixed low value never
@@ -469,11 +470,23 @@ def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
     steps, noise_left, stuck = 0, 0, 0
     max_stuck = int(STUCK_SECONDS * CONTROL_HZ)
     max_steps = int(max_seconds * CONTROL_HZ)
+    ref_loc = vehicle.get_location()
     while steps < max_steps and not expert.done():
         throttle, steer, brake, info = expert.step()
-        # A permanent traffic deadlock would otherwise burn the whole route
-        # budget; abort and let the next route start.
-        stuck = stuck + 1 if info["progress_delta"] < 1e-4 else 0
+        # Deadlock detection.  Two mistakes to avoid, both observed:
+        #  * measuring progress as a fraction of the route makes a long route
+        #    look stuck while the vehicle is actually crawling forward, so the
+        #    criterion is displacement in metres;
+        #  * a red light is a *legal* stop, and a CARLA junction can stay red for
+        #    more than 35 s, so the timer is paused while the expert is obeying
+        #    a light or a stop sign.
+        loc = vehicle.get_location()
+        if info["red_light"] or info["stop_sign"]:
+            stuck, ref_loc = 0, loc
+        elif math.hypot(loc.x - ref_loc.x, loc.y - ref_loc.y) > STUCK_DISTANCE_M:
+            stuck, ref_loc = 0, loc
+        else:
+            stuck += 1
         if stuck > max_stuck:
             # Dump why the expert believes it must stand still: without this the
             # abort message says nothing about the cause and every diagnosis is
