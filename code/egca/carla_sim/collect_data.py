@@ -32,6 +32,13 @@ CONTROL_HZ = 10.0            # simulator / expert control rate
 RECORD_EVERY = 5             # -> 2 Hz recording rate (Table 5-1)
 MAX_ROUTE_SECONDS = 300.0
 MIN_ROUTE_METERS = 800.0     # plan long enough to contain several junctions
+TRAFFIC_WARMUP_STEPS = 30    # let the spawned traffic disperse before recording
+STUCK_SECONDS = 25.0         # abandon a gridlocked route instead of recording it
+# Traffic density is drawn per route from this range.  A single fixed value is
+# both unrealistic and risky: 0.4 gridlocks a small town such as Town01 (one dry
+# run produced 8 usable frames out of 120), while a fixed low value never
+# exercises car following.
+DENSITY_RANGE = (0.08, 0.25)
 NOISE_PROB = 0.01            # probability of starting a perturbation burst
 NOISE_STEPS = 5              # length of a burst (0.5 s at 10 Hz)
 NOISE_STD = 0.15             # std of the injected steering perturbation
@@ -340,6 +347,11 @@ def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
             if veh:
                 veh.set_autopilot(True, tm.get_port())
                 traffic.append(veh)
+        # Traffic spawns in one instant and starts out clumped at the spawn
+        # points; a short warm-up lets it disperse, so the ego does not begin
+        # every route inside an artificial queue.
+        for _ in range(TRAFFIC_WARMUP_STEPS):
+            world.tick()
     # Route destinations are taken from spawn points that are *not* used by the
     # background traffic, so the route does not end on top of a parked car.
     target_pts = spawn_points[n_traffic:n_traffic + 8] or spawn_points[-8:]
@@ -365,7 +377,7 @@ def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
     print(f"collecting {town} route {route_id} weather={weather} "
           f"({expert.route_length:.0f} m) ...")
     steps, noise_left, stuck = 0, 0, 0
-    max_stuck = int(60.0 * CONTROL_HZ)            # abort after 60 s without motion
+    max_stuck = int(STUCK_SECONDS * CONTROL_HZ)
     max_steps = int(max_seconds * CONTROL_HZ)
     while steps < max_steps and not expert.done():
         throttle, steer, brake, info = expert.step()
@@ -373,7 +385,7 @@ def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
         # budget; abort and let the next route start.
         stuck = stuck + 1 if info["progress_delta"] < 1e-4 else 0
         if stuck > max_stuck:
-            print("  aborting: no progress for 60 s")
+            print(f"  aborting: no progress for {STUCK_SECONDS:.0f} s")
             break
         # Noise injection (Sec. 5-1): the *applied* steering is perturbed for a
         # short burst so that the dataset also covers slightly off-lane states
@@ -417,7 +429,10 @@ def main():
     ap.add_argument("--town", default="Town01")
     ap.add_argument("--routes", type=int, default=5)
     ap.add_argument("--output", required=True)
-    ap.add_argument("--traffic-density", type=float, default=0.2)
+    ap.add_argument("--traffic-density", type=float, default=-1.0,
+                    help="fraction of spawn points filled with traffic; the "
+                         f"default draws it per route from {DENSITY_RANGE}, "
+                         "which both varies the scene and avoids gridlock")
     ap.add_argument("--max-seconds", type=float, default=MAX_ROUTE_SECONDS,
                     help="per-route time budget; use ~60 for a dry run")
     ap.add_argument("--min-route-m", type=float, default=MIN_ROUTE_METERS)
@@ -435,9 +450,15 @@ def main():
     weathers = list(TRAIN_WEATHERS.keys())
     for route_id in range(args.first_route, args.first_route + args.routes):
         w = weathers[route_id % len(weathers)]
-        collect_route(client, args.town, args.output, route_id, w,
-                      args.traffic_density, args.max_seconds, args.min_route_m,
-                      args.tm_port)
+        density = (random.uniform(*DENSITY_RANGE) if args.traffic_density < 0
+                   else args.traffic_density)
+        try:
+            collect_route(client, args.town, args.output, route_id, w,
+                          density, args.max_seconds, args.min_route_m,
+                          args.tm_port)
+        except (RuntimeError, IndexError) as e:
+            # One bad route must not kill a multi-day collection.
+            print(f"route {route_id} failed: {e}")
 
 
 if __name__ == "__main__":

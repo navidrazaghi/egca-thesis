@@ -38,15 +38,16 @@ def route_dirs(root):
 
 
 def load_poses(route):
-    """Frame ids and poses, ordered by frame id."""
+    """Frame ids, poses and navigation commands, ordered by frame id."""
     mdir = os.path.join(route, "measurements")
     fids = sorted(f[:-5] for f in os.listdir(mdir) if f.endswith(".json"))
-    poses = []
+    poses, cmds = [], []
     for fid in fids:
         with open(os.path.join(mdir, fid + ".json")) as f:
             m = json.load(f)
         poses.append((m["x"], m["y"], m["yaw"]))
-    return fids, poses
+        cmds.append(int(m.get("command", 3)))
+    return fids, poses, cmds
 
 
 def to_ego(x, y, ref):
@@ -72,7 +73,7 @@ def build_route(route, horizon, max_step=25.0, keep_edges=2):
     each end of every standstill and the rest are dropped by simply not writing a
     label (the loader takes `labels/` as the authoritative frame list).
     """
-    fids, poses = load_poses(route)
+    fids, poses, cmds = load_poses(route)
     ldir = os.path.join(route, "labels")
     os.makedirs(ldir, exist_ok=True)
     for old in os.listdir(ldir):             # rebuild from scratch, idempotent
@@ -99,7 +100,11 @@ def build_route(route, horizon, max_step=25.0, keep_edges=2):
             continue
         cand[i] = (wps, sum(steps))
 
-    # ---- pass 2: thin out the interior of every standstill run
+    # ---- pass 2: thin out the interior of every standstill run.
+    # Frames carrying a turn command are never dropped: vehicles stand still
+    # precisely at junctions, which is also where the only non-lane-follow
+    # commands occur, so blind thinning erases the conditional signal the policy
+    # has to learn (measured: it took the turn commands of a route to zero).
     idxs = sorted(cand)
     drop = set()
     run = []
@@ -109,7 +114,8 @@ def build_route(route, horizon, max_step=25.0, keep_edges=2):
             run.append(i)
             continue
         if len(run) > 2 * keep_edges:
-            drop.update(run[keep_edges:len(run) - keep_edges])
+            interior = run[keep_edges:len(run) - keep_edges]
+            drop.update(j for j in interior if cmds[j] == 3)
         run = []
 
     written = stopped = 0
