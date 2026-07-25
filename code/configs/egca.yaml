@@ -1,0 +1,56 @@
+# Full EGCA configuration — matches Table 4-1 / Table 5-2 of the thesis.
+model:
+  embed_dim: 256
+  camera:
+    backbone: resnet34
+    pretrained: true
+    image_size: [160, 704]        # H, W (3 front cameras stitched)
+  lidar:
+    x_range: [0.0, 32.0]          # forward (m)
+    y_range: [-16.0, 16.0]        # lateral (m)
+    z_range: [-2.5, 1.5]
+    pillar_size: 0.25             # -> 128 x 128 BEV grid
+    max_pillars: 4096
+    max_points_per_pillar: 24
+    pillar_feat_dim: 64
+  fusion:
+    num_blocks: 4                 # L
+    num_heads: 4                  # H
+    ffn_dim: 512
+    attention: linear             # linear | full  (ablation switch)
+    gate: true                    # sensor-reliability gate (ablation switch)
+    gate_hidden: 128
+  decoder:
+    hidden_dim: 256
+    horizon: 4                    # T waypoints
+    wp_dt: 0.5                    # seconds between waypoints
+  aux:
+    bev_seg: true                 # ablation switch
+    bev_classes: 6                # road, lane-marking, vehicle, pedestrian, obstacle, free
+    depth: true
+
+train:
+  epochs: 60
+  batch_size: 128
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  warmup_epochs: 2
+  sensor_dropout: 0.15            # rho (ablation switch: 0.0)
+  amp: true
+  num_workers: 8
+  log_every: 50
+  ckpt_dir: checkpoints/egca
+
+control:
+  lateral:  {kp: 1.25, ki: 0.75, kd: 0.30, window: 20}
+  longitudinal: {kp: 5.0, ki: 0.5, kd: 1.0, window: 20}
+  max_throttle: 0.75
+  brake_speed_ratio: 1.05         # brake if v > ratio * v_des
+  clip_delta: 0.25
+
+data:
+  root: dataset/
+  towns_train: [Town01, Town02, Town03, Town04, Town06]
+  towns_val: [Town05]
+  seg_size: [128, 128]
+  depth_size: [80, 352]           # half-resolution depth target

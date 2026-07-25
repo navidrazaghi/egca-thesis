@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(unzip -oq \"Projects Template V 4.5 - 97.07.28 Nob.docx\" -d template_unpacked)",
+      "Bash(pandoc -t markdown \"Projects Template V 4.5 - 97.07.28 Nob.docx\" -o template_content.md)",
+      "Bash(where pandoc *)",
+      "Bash(python -c \"import docx; print\\('python-docx', docx.__version__ if hasattr\\(docx,'__version__'\\) else 'ok'\\)\")",
+      "Bash(python -c \"import matplotlib; print\\('matplotlib', matplotlib.__version__\\)\")",
+      "Bash(python -c \"import numpy; print\\('numpy', numpy.__version__\\)\")",
+      "Bash(python -)",
+      "Bash(python -c \"import lxml; print\\('lxml ok'\\)\")",
+      "Bash(python -c \"import latex2mathml; print\\('latex2mathml ok'\\)\")",
+      "Read(//c/Program Files/Microsoft Office/root/Office16/**)",
+      "Bash(pip install *)",
+      "Bash(python figures.py)",
+      "Bash(python -c ' *)",
+      "Bash(python build_thesis.py)",
+      "Bash(python -c \"import win32com.client; print\\('pywin32 ok'\\)\")",
+      "Bash(python -c \"import fitz; print\\('pymupdf ok', fitz.__doc__\\)\")",
+      "Bash(python -c \"import pdf2image\")",
+      "Bash(taskkill /F /IM WINWORD.EXE)",
+      "Bash(python -c \"import torch; print\\('torch', torch.__version__, 'cuda', torch.cuda.is_available\\(\\)\\)\")",
+      "Bash(python -c \"import yaml; print\\('yaml ok'\\)\")",
+      "Bash(timeout 900 python -c ' *)",
+      "Bash(python -m py_compile egca/carla_sim/evaluate.py egca/carla_sim/collect_data.py egca/models/*.py egca/training/*.py egca/control/pid.py)",
+      "Bash(timeout 900 python smoke_test.py)",
+      "Bash(python -m py_compile egca/carla_sim/collect_data.py)"
+    ]
+  }
+}

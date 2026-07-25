@@ -1,0 +1,12 @@
+﻿__pycache__/
+*.pyc
+*.pth
+code/checkpoints/
+dataset/
+results/
+logs/
+tb/
+build_unpacked/
+render/
+*.pdf
+~$*
