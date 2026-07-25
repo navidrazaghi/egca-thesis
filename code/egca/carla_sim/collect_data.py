@@ -475,7 +475,21 @@ def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
         # budget; abort and let the next route start.
         stuck = stuck + 1 if info["progress_delta"] < 1e-4 else 0
         if stuck > max_stuck:
-            print(f"  aborting: no progress for {STUCK_SECONDS:.0f} s")
+            # Dump why the expert believes it must stand still: without this the
+            # abort message says nothing about the cause and every diagnosis is
+            # a guess.
+            v = vehicle.get_velocity()
+            print(f"  aborting: no progress for {STUCK_SECONDS:.0f} s | "
+                  f"speed={math.hypot(v.x, v.y):.2f} "
+                  f"target={info['target_speed']:.2f} "
+                  f"red={int(info['red_light'])} "
+                  f"stop_sign={int(info['stop_sign'])} "
+                  f"lead={info['lead_distance']:.1f} "
+                  f"lead_walker={int(info['lead_is_walker'])} "
+                  f"n_ahead={info['n_ahead']} "
+                  f"creeping={int(info['creeping'])} "
+                  f"off_route={info['off_route_m']:.1f} m "
+                  f"progress={100 * info['progress']:.1f}%")
             break
         # Noise injection (Sec. 5-1): the *applied* steering is perturbed for a
         # short burst so that the dataset also covers slightly off-lane states

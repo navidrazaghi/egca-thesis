@@ -118,7 +118,11 @@ class _Scenario:
         veh = self.world.try_spawn_actor(bp, tf)
         if veh is None:
             return False
-        veh.set_autopilot(False)
+        # NOTE: do *not* call set_autopilot(False) here.  Even with False, CARLA
+        # instantiates a Traffic Manager on its default port (8000) and raises
+        # if that port is taken -- which silently killed every vehicle-based
+        # scenario on this machine.  A freshly spawned vehicle is not on
+        # autopilot anyway; the explicit port is only needed in retire().
         self.actors.append(veh)
         self.vehicle = veh
         return True
@@ -156,7 +160,11 @@ class _Scenario:
         veh = self.world.try_spawn_actor(bp, tf)
         if veh is None:
             return False
-        veh.set_autopilot(False)
+        # NOTE: do *not* call set_autopilot(False) here.  Even with False, CARLA
+        # instantiates a Traffic Manager on its default port (8000) and raises
+        # if that port is taken -- which silently killed every vehicle-based
+        # scenario on this machine.  A freshly spawned vehicle is not on
+        # autopilot anyway; the explicit port is only needed in retire().
         self.actors.append(veh)
         self.vehicle = veh
         return True
