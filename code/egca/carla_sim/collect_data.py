@@ -10,6 +10,7 @@ import json
 import math
 import os
 import random
+import shutil
 import time
 
 import cv2
@@ -40,6 +41,8 @@ STUCK_SECONDS = 25.0         # abandon a gridlocked route instead of recording i
 # run produced 8 usable frames out of 120), while a fixed low value never
 # exercises car following.
 DENSITY_RANGE = (0.10, 0.30)
+MIN_USEFUL_FRAMES = 40       # below this a route is discarded and retried
+MAX_ROUTE_ATTEMPTS = 3
 NOISE_PROB = 0.01            # probability of starting a perturbation burst
 NOISE_STEPS = 5              # length of a burst (0.5 s at 10 Hz)
 NOISE_STD = 0.15             # std of the injected steering perturbation
@@ -372,10 +375,10 @@ def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2
     world.tick()
     traffic, peds = [], ([], [])
     try:
-        _drive_route(client, world, vehicle, others, town, out_base,
-                     route_id, weather, traffic_density, max_seconds,
-                     min_route_m, tm_port, traffic, n_walkers, peds,
-                     scenario_every_m)
+        return _drive_route(client, world, vehicle, others, town, out_base,
+                            route_id, weather, traffic_density, max_seconds,
+                            min_route_m, tm_port, traffic, n_walkers, peds,
+                            scenario_every_m)
     finally:
         destroy_walkers(*peds)
         # Order matters: release the Traffic Manager before its vehicles are
@@ -442,7 +445,7 @@ def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
             break
     if expert is None or expert.route_length < 50.0:
         print("  could not plan a route, skipping")
-        return
+        return 0, None
     # Pedestrians are spawned only now, so they can be placed along the planned
     # route instead of uniformly over the town.
     if n_walkers and peds is not None:
@@ -503,6 +506,7 @@ def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
     collector.cleanup()
     print(f"  collected {collector.frame_id} frames "
           f"({'completed' if expert.done() else 'timed out'})")
+    return collector.frame_id, out_dir
 
 
 def main():
@@ -543,14 +547,27 @@ def main():
         w = weathers[route_id % len(weathers)]
         density = (random.uniform(*DENSITY_RANGE) if args.traffic_density < 0
                    else args.traffic_density)
-        try:
-            collect_route(client, args.town, args.output, route_id, w,
-                          density, args.max_seconds, args.min_route_m,
-                          args.tm_port, args.walkers,
-                          args.scenario_every_m)
-        except (RuntimeError, IndexError) as e:
-            # One bad route must not kill a multi-day collection.
-            print(f"route {route_id} failed: {e}")
+        # Outcome-based retry: some spawn points start the ego in a place it
+        # cannot leave (blocked lane, route beginning behind a divider).  Rather
+        # than diagnosing every such geometry, a route that yields almost no
+        # usable frames is discarded and retried from a different spawn point.
+        for attempt in range(MAX_ROUTE_ATTEMPTS):
+            try:
+                frames, out_dir = collect_route(
+                    client, args.town, args.output, route_id, w, density,
+                    args.max_seconds, args.min_route_m, args.tm_port,
+                    args.walkers, args.scenario_every_m)
+            except (RuntimeError, IndexError) as e:
+                # One bad route must not kill a multi-day collection.
+                print(f"route {route_id} failed: {e}")
+                frames, out_dir = 0, None
+            if frames >= MIN_USEFUL_FRAMES:
+                break
+            if out_dir and os.path.isdir(out_dir):
+                shutil.rmtree(out_dir, ignore_errors=True)
+            if attempt < MAX_ROUTE_ATTEMPTS - 1:
+                print(f"  only {frames} frames, retrying route {route_id} "
+                      f"from a different spawn point")
 
 
 if __name__ == "__main__":
