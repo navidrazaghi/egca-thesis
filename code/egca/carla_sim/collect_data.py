@@ -218,7 +218,11 @@ class DataCollector:
 
 
 def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2,
-                  max_seconds=MAX_ROUTE_SECONDS, min_route_m=MIN_ROUTE_METERS):
+                  max_seconds=MAX_ROUTE_SECONDS, min_route_m=MIN_ROUTE_METERS,
+                  tm_port=8000):
+    """Collect one route.  Always leaves the simulator in asynchronous mode, even
+    on failure: a server abandoned in synchronous mode waits forever for a tick
+    that nobody sends, and every later client would hang."""
     world = client.get_world()
     if world.get_map().name.split("/")[-1] != town:
         world = client.load_world(town)
@@ -227,22 +231,47 @@ def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2
     settings.fixed_delta_seconds = 1.0 / CONTROL_HZ
     world.apply_settings(settings)
     apply_weather(world, weather)
-    world.set_weather(world.get_weather())
     bp = world.get_blueprint_library().filter("vehicle.tesla.model3")[0]
     spawn_points = world.get_map().get_spawn_points()
     random.shuffle(spawn_points)
     vehicle = world.spawn_actor(bp, spawn_points[0])
     world.tick()
-    # background traffic under CARLA's own autopilot
     traffic = []
-    tm = client.get_trafficmanager()
-    tm.set_synchronous_mode(True)
-    for sp in spawn_points[1: max(2, int(len(spawn_points) * traffic_density))]:
-        vbp = random.choice(world.get_blueprint_library().filter("vehicle.*"))
-        veh = world.try_spawn_actor(vbp, sp)
-        if veh:
-            veh.set_autopilot(True, tm.get_port())
-            traffic.append(veh)
+    try:
+        _drive_route(client, world, vehicle, spawn_points, town, out_base,
+                     route_id, weather, traffic_density, max_seconds,
+                     min_route_m, tm_port, traffic)
+    finally:
+        for t in traffic:
+            try:
+                t.destroy()
+            except RuntimeError:
+                pass
+        try:
+            vehicle.destroy()
+        except RuntimeError:
+            pass
+        settings = world.get_settings()
+        settings.synchronous_mode = False
+        settings.fixed_delta_seconds = None
+        world.apply_settings(settings)
+
+
+def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
+                 weather, traffic_density, max_seconds, min_route_m, tm_port,
+                 traffic):
+    # background traffic under CARLA's own autopilot.  Each simulator instance
+    # needs its own Traffic Manager port, otherwise a second instance fails to
+    # bind (the TM RPC server lives on the host network).
+    if traffic_density > 0:
+        tm = client.get_trafficmanager(tm_port)
+        tm.set_synchronous_mode(True)
+        for sp in spawn_points[1: max(2, int(len(spawn_points) * traffic_density))]:
+            vbp = random.choice(world.get_blueprint_library().filter("vehicle.*"))
+            veh = world.try_spawn_actor(vbp, sp)
+            if veh:
+                veh.set_autopilot(True, tm.get_port())
+                traffic.append(veh)
     # a route long enough to contain several junctions: chain destinations until
     # the planned length exceeds MIN_ROUTE_METERS
     targets, expert = [], None
@@ -258,9 +287,6 @@ def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2
             break
     if expert is None or expert.route_length < 50.0:
         print("  could not plan a route, skipping")
-        vehicle.destroy()
-        for t in traffic:
-            t.destroy()
         return
     out_dir = os.path.join(out_base, f"route_{route_id:03d}_{weather}")
     os.makedirs(out_dir, exist_ok=True)
@@ -306,9 +332,6 @@ def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2
     with open(os.path.join(out_dir, "route.json"), "w") as f:
         json.dump(meta, f, indent=2)
     collector.cleanup()
-    vehicle.destroy()
-    for t in traffic:
-        t.destroy()
     print(f"  collected {collector.frame_id} frames "
           f"({'completed' if expert.done() else 'timed out'})")
 
@@ -330,6 +353,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--first-route", type=int, default=0,
                     help="id of the first route (to resume an interrupted run)")
+    ap.add_argument("--tm-port", type=int, default=8000,
+                    help="Traffic Manager RPC port; must differ per simulator "
+                         "instance when several run in parallel")
     args = ap.parse_args()
     random.seed(args.seed)
     client = carla.Client(args.host, args.port)
@@ -338,7 +364,8 @@ def main():
     for route_id in range(args.first_route, args.first_route + args.routes):
         w = weathers[route_id % len(weathers)]
         collect_route(client, args.town, args.output, route_id, w,
-                      args.traffic_density, args.max_seconds, args.min_route_m)
+                      args.traffic_density, args.max_seconds, args.min_route_m,
+                      args.tm_port)
 
 
 if __name__ == "__main__":
