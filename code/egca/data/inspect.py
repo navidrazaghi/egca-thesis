@@ -134,7 +134,7 @@ def main():
     # why was the expert slow?  split the frames by the reason it had to brake
     groups = {"red light": [], "stop sign": [], "lead vehicle": [],
               "lead walker": [], "free": []}
-    leads, ahead = [], []
+    leads, ahead, scen = [], [], {}
     for r, f in pool:
         with open(os.path.join(r, "measurements", f + ".json")) as fh:
             m = json.load(fh)
@@ -146,6 +146,9 @@ def main():
         stop += int(m["stop_sign"])
         noise += int(m["noise"])
         ahead.append(int(m.get("n_ahead", 0)))
+        sc = m.get("scenario", "")
+        if sc:
+            scen[sc] = scen.get(sc, 0) + 1
         if m["red_light"]:
             groups["red light"].append(m["speed"])
         elif m["stop_sign"]:
@@ -173,6 +176,10 @@ def main():
           f"  p95 {np.percentile(lens,95):5.2f} m")
     print(f"commands     L {cmd_hist[0]}  R {cmd_hist[1]}  S {cmd_hist[2]}  "
           f"FOLLOW {cmd_hist[3]}   ({100*cmd_hist[3]/max(n,1):.0f}% lane-follow)")
+    total_scen = sum(scen.values())
+    print(f"critical scenarios  {100*total_scen/max(n,1):.1f}% of frames  " +
+          ("  ".join(f"{k} {100*v/max(n,1):.1f}%" for k, v in sorted(scen.items()))
+           or "(none injected)"))
     print(f"red light    {100*red/max(n,1):.1f}%   stop sign {100*stop/max(n,1):.1f}%"
           f"   perturbed {100*noise/max(n,1):.1f}%")
     print("\nwhy the expert was slow (share of frames / mean speed in each):")

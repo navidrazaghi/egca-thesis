@@ -27,7 +27,9 @@
       "Bash(python -m py_compile egca/carla_sim/collect_data.py)",
       "Bash(python -m py_compile egca/carla_sim/collect_data.py egca/carla_sim/expert.py egca/data/build_labels.py egca/data/inspect.py)",
       "Bash(python -m py_compile egca/carla_sim/expert.py egca/carla_sim/collect_data.py)",
-      "Bash(python -m py_compile egca/data/inspect.py egca/carla_sim/collect_data.py)"
+      "Bash(python -m py_compile egca/data/inspect.py egca/carla_sim/collect_data.py)",
+      "Bash(python -m py_compile egca/carla_sim/collect_data.py egca/carla_sim/scenarios.py)",
+      "Bash(python -m py_compile egca/data/inspect.py)"
     ]
   }
 }

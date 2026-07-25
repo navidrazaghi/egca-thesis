@@ -26,6 +26,7 @@ from .sensors import (CAMERAS, spawn_rig, carla_image_to_array,
                       carla_lidar_to_array, carla_depth_to_array,
                       depth_to_normalized_inverse, stitch_cameras,
                       transform_to_ego)
+from .scenarios import ScriptedScenarios
 from .weather import TRAIN_WEATHERS, apply_weather
 
 CONTROL_HZ = 10.0            # simulator / expert control rate
@@ -114,6 +115,7 @@ class DataCollector:
             "n_ahead": int(info.get("n_ahead", 0)),
             "lead_is_walker": bool(info.get("lead_is_walker", False)),
             "creeping": bool(info.get("creeping", False)),
+            "scenario": str(info.get("scenario", "")),
             "noise": bool(noise),
         }
         with open(os.path.join(self.out_dir, "measurements", fid + ".json"), "w") as f:
@@ -348,7 +350,7 @@ def spawn_ego(world, bp, spawn_points):
 
 def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2,
                   max_seconds=MAX_ROUTE_SECONDS, min_route_m=MIN_ROUTE_METERS,
-                  tm_port=8000, n_walkers=60):
+                  tm_port=8000, n_walkers=60, scenario_every_m=0.0):
     """Collect one route.  Always leaves the simulator in asynchronous mode, even
     on failure: a server abandoned in synchronous mode waits forever for a tick
     that nobody sends, and every later client would hang."""
@@ -372,7 +374,8 @@ def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2
     try:
         _drive_route(client, world, vehicle, others, town, out_base,
                      route_id, weather, traffic_density, max_seconds,
-                     min_route_m, tm_port, traffic, n_walkers, peds)
+                     min_route_m, tm_port, traffic, n_walkers, peds,
+                     scenario_every_m)
     finally:
         destroy_walkers(*peds)
         # Order matters: release the Traffic Manager before its vehicles are
@@ -401,7 +404,7 @@ def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2
 
 def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
                  weather, traffic_density, max_seconds, min_route_m, tm_port,
-                 traffic, n_walkers=0, peds=None):
+                 traffic, n_walkers=0, peds=None, scenario_every_m=0.0):
     # background traffic under CARLA's own autopilot.  Each simulator instance
     # needs its own Traffic Manager port, otherwise a second instance fails to
     # bind (the TM RPC server lives on the host network).
@@ -451,8 +454,11 @@ def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
     out_dir = os.path.join(out_base, f"route_{route_id:03d}_{weather}")
     os.makedirs(out_dir, exist_ok=True)
     collector = DataCollector(world, vehicle, out_dir)
+    scenarios = ScriptedScenarios(world, vehicle, expert.plan, expert.cum,
+                                  every_m=scenario_every_m, rng=random)
     print(f"collecting {town} route {route_id} weather={weather} "
-          f"({expert.route_length:.0f} m) ...")
+          f"({expert.route_length:.0f} m, "
+          f"{len(scenarios.pending)} scripted scenarios) ...")
     steps, noise_left, stuck = 0, 0, 0
     max_stuck = int(STUCK_SECONDS * CONTROL_HZ)
     max_steps = int(max_seconds * CONTROL_HZ)
@@ -478,6 +484,7 @@ def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
             noise_left -= 1
         vehicle.apply_control(carla.VehicleControl(
             throttle=throttle, steer=applied_steer, brake=brake))
+        info["scenario"] = scenarios.tick(expert.idx, 1.0 / CONTROL_HZ) or ""
         collector.tick((throttle, applied_steer, brake), info,
                        record=(steps % RECORD_EVERY == 0),
                        noise=(noise_left > 0))
@@ -488,9 +495,11 @@ def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
     meta = {"town": town, "weather": weather, "control_hz": CONTROL_HZ,
             "record_every": RECORD_EVERY, "frames": collector.frame_id,
             "route_length_m": expert.route_length,
-            "completed": bool(expert.done())}
+            "completed": bool(expert.done()),
+            "scenarios_fired": [k for k, _ in scenarios.fired]}
     with open(os.path.join(out_dir, "route.json"), "w") as f:
         json.dump(meta, f, indent=2)
+    scenarios.cleanup()
     collector.cleanup()
     print(f"  collected {collector.frame_id} frames "
           f"({'completed' if expert.done() else 'timed out'})")
@@ -516,6 +525,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--first-route", type=int, default=0,
                     help="id of the first route (to resume an interrupted run)")
+    ap.add_argument("--scenario-every-m", type=float, default=0.0,
+                    help="mean spacing of scripted safety-critical scenarios "
+                         "along a route in metres; 0 disables them")
     ap.add_argument("--walkers", type=int, default=60,
                     help="pedestrians spawned per route (0 disables them)")
     ap.add_argument("--tm-port", type=int, default=8100,
@@ -534,7 +546,8 @@ def main():
         try:
             collect_route(client, args.town, args.output, route_id, w,
                           density, args.max_seconds, args.min_route_m,
-                          args.tm_port, args.walkers)
+                          args.tm_port, args.walkers,
+                          args.scenario_every_m)
         except (RuntimeError, IndexError) as e:
             # One bad route must not kill a multi-day collection.
             print(f"route {route_id} failed: {e}")
