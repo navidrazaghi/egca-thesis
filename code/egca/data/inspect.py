@@ -83,16 +83,15 @@ def panel(route, fid):
         prev = p
     seg_rgb = cv2.resize(seg_rgb, (352, 352), interpolation=cv2.INTER_NEAREST)
 
+    # the depth target is aligned with the RGB strip, so show it at the same width
     dep_rgb = cv2.applyColorMap((255 * np.clip(depth, 0, 1)).astype(np.uint8),
                                 cv2.COLORMAP_MAGMA)
-    dep_rgb = cv2.resize(dep_rgb, (352, 160), interpolation=cv2.INTER_NEAREST)
+    dep_rgb = cv2.resize(dep_rgb, (704, 160), interpolation=cv2.INTER_NEAREST)
 
-    right = np.zeros((352, 352, 3), dtype=np.uint8)
-    right[:352] = seg_rgb
     left = np.zeros((352, 704, 3), dtype=np.uint8)
     left[:160] = rgb
-    left[176:336] = dep_rgb[:, :]
-    canvas = np.concatenate([left, right], axis=1)
+    left[176:336] = dep_rgb
+    canvas = np.concatenate([left, seg_rgb], axis=1)
 
     cmd = ["LEFT", "RIGHT", "STRAIGHT", "FOLLOW"][int(meas["command"])]
     txt = (f"{os.path.basename(route)}/{fid}  v={meas['speed']:.1f} "
@@ -132,6 +131,9 @@ def main():
     red = stop = noise = lidar_pts = 0
     depth_zero = 0
     n = 0
+    # why was the expert slow?  split the frames by the reason it had to brake
+    groups = {"red light": [], "stop sign": [], "lead vehicle": [], "free": []}
+    leads = []
     for r, f in pool:
         with open(os.path.join(r, "measurements", f + ".json")) as fh:
             m = json.load(fh)
@@ -142,6 +144,15 @@ def main():
         red += int(m["red_light"])
         stop += int(m["stop_sign"])
         noise += int(m["noise"])
+        if m["red_light"]:
+            groups["red light"].append(m["speed"])
+        elif m["stop_sign"]:
+            groups["stop sign"].append(m["speed"])
+        elif m["lead_distance"] > 0:
+            groups["lead vehicle"].append(m["speed"])
+            leads.append(m["lead_distance"])
+        else:
+            groups["free"].append(m["speed"])
         lens.append(float(np.hypot(wps[-1][0], wps[-1][1])))
         n += 1
         if n % max(1, len(pool) // 20) == 0 or n <= 200:
@@ -161,6 +172,17 @@ def main():
           f"FOLLOW {cmd_hist[3]}   ({100*cmd_hist[3]/max(n,1):.0f}% lane-follow)")
     print(f"red light    {100*red/max(n,1):.1f}%   stop sign {100*stop/max(n,1):.1f}%"
           f"   perturbed {100*noise/max(n,1):.1f}%")
+    print("\nwhy the expert was slow (share of frames / mean speed in each):")
+    for name, vals in groups.items():
+        if vals:
+            print(f"  {name:14s} {100*len(vals)/max(n,1):5.1f}%   "
+                  f"mean speed {np.mean(vals):4.2f} m/s   "
+                  f"stopped {100*np.mean(np.array(vals) < 0.3):4.1f}%")
+        else:
+            print(f"  {name:14s}   0.0%")
+    if leads:
+        print(f"  lead distance when a blocker was seen: mean {np.mean(leads):.1f} m,"
+              f" p10 {np.percentile(leads,10):.1f} m")
     tot = max(cls_hist.sum(), 1)
     names = ["free", "road", "lane", "vehicle", "pedestrian", "static"]
     print("BEV classes  " + "  ".join(

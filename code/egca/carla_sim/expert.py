@@ -76,9 +76,13 @@ class PrivilegedExpert:
     FULL_LOCK_ANGLE = 45.0     # heading error that saturates the steering (deg)
     STEER_SMOOTH = 0.6         # weight of the new command in the low-pass
     # hazards
-    CORRIDOR_HALF_WIDTH = 1.6  # lateral gate for vehicles (m)
-    WALKER_HALF_WIDTH = 2.2    # wider gate for pedestrians (m)
+    CORRIDOR_HALF_WIDTH = 1.1  # lateral gate for vehicles, plus their half-width
+    WALKER_HALF_WIDTH = 1.8    # wider gate for pedestrians (m)
     STOP_SIGN_MARGIN = 2.0     # slack added to the stop-sign trigger volume (m)
+    # car following
+    STANDSTILL_GAP = 5.0       # gap kept at zero speed (m)
+    HEADWAY = 1.5              # time headway (s)
+    GAP_GAIN = 0.5             # how strongly a gap error changes the target speed
 
     def __init__(self, world, vehicle, targets, base_speed=6.0):
         if not _HAS_AGENTS:
@@ -217,6 +221,14 @@ class PrivilegedExpert:
                 return True
         return False
 
+    def _is_oncoming(self, act, tf):
+        """True if the actor's heading is roughly opposite to ours."""
+        try:
+            return abs(_yaw_diff(tf.rotation.yaw,
+                                 act.get_transform().rotation.yaw)) > 120.0
+        except RuntimeError:
+            return False
+
     def _actor_hazard(self, tf, speed):
         """Closest vehicle/pedestrian inside a speed-dependent forward corridor.
         Returns (distance, speed) of the blocker, or (None, None)."""
@@ -231,13 +243,20 @@ class PrivilegedExpert:
                 continue
             loc = act.get_location()
             fwd, lat = self._to_ego(loc.x, loc.y, tf)
+            # Only the actor's half-*width* widens the lateral gate.  Using its
+            # half-length (extent.x, ~2.5 m for a car) would inflate the gate to
+            # ~4 m and flag oncoming and adjacent-lane traffic as blockers, which
+            # makes the expert brake almost continuously on a two-lane road.
             try:
-                margin = max(act.bounding_box.extent.x,
-                             act.bounding_box.extent.y)
+                margin = act.bounding_box.extent.y
             except (AttributeError, RuntimeError):
-                margin = 1.0
+                margin = 0.9
             gate = (self.WALKER_HALF_WIDTH if is_walker
                     else self.CORRIDOR_HALF_WIDTH) + margin
+            # An oncoming vehicle in the opposite lane is not a blocker; only
+            # treat it as one if it is nearly head-on inside our own lane.
+            if not is_walker and self._is_oncoming(act, tf) and abs(lat) > 1.2:
+                continue
             if 0.5 < fwd < reach and abs(lat) < gate:
                 if best_d is None or fwd < best_d:
                     v = act.get_velocity()
@@ -267,9 +286,16 @@ class PrivilegedExpert:
         if red_light or stop_sign:
             target = 0.0
         elif lead_d is not None:
-            # keep a two-second gap, and match the leader's speed
-            safe = max(0.0, (lead_d - 5.0) / 2.0)
-            target = min(target, max(0.0, (lead_v or 0.0) - 0.5), safe)
+            # Car-following law: aim for a 1.5 s time headway on top of a 5 m
+            # standstill gap.  At the desired gap the target equals the leader's
+            # speed; a larger gap allows closing in, a smaller one brakes below
+            # the leader.  (The previous form capped the speed at (d-5)/2
+            # regardless of the leader, so following a car 10 m ahead crawled at
+            # 2.5 m/s and the whole dataset became a traffic jam.)
+            gap_desired = self.STANDSTILL_GAP + self.HEADWAY * speed
+            gap_err = lead_d - gap_desired
+            follow = (lead_v or 0.0) + self.GAP_GAIN * gap_err
+            target = min(target, max(0.0, follow))
 
         # ---- longitudinal control
         err = target - speed
