@@ -213,8 +213,29 @@ class DataCollector:
         return cv2.resize(inv, (352, 80), interpolation=cv2.INTER_AREA)
 
     def cleanup(self):
+        """Stop the sensors before destroying them.
+
+        Destroying a listening sensor lets its callback fire on an actor that no
+        longer exists, which aborts the process with a C++ `std::runtime_error`
+        ("trying to operate on a destroyed actor").  Stopping first, then
+        ticking once so queued callbacks drain, avoids it.
+        """
         for a in self.actors:
-            a.destroy()
+            try:
+                if a.is_listening:
+                    a.stop()
+            except RuntimeError:
+                pass
+        try:
+            self.world.tick()
+        except RuntimeError:
+            pass
+        for a in self.actors:
+            try:
+                a.destroy()
+            except RuntimeError:
+                pass
+        self.actors = []
 
 
 def clear_world(world):
@@ -277,15 +298,24 @@ def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2
                      route_id, weather, traffic_density, max_seconds,
                      min_route_m, tm_port, traffic)
     finally:
-        for t in traffic:
+        # Order matters: release the Traffic Manager before its vehicles are
+        # destroyed, then destroy the actors in one batch, and only then put the
+        # server back into asynchronous mode.
+        if traffic_density > 0:
             try:
-                t.destroy()
+                client.get_trafficmanager(tm_port).set_synchronous_mode(False)
             except RuntimeError:
                 pass
         try:
-            vehicle.destroy()
+            client.apply_batch_sync(
+                [carla.command.DestroyActor(a) for a in traffic + [vehicle]],
+                True)
         except RuntimeError:
-            pass
+            for a in traffic + [vehicle]:
+                try:
+                    a.destroy()
+                except RuntimeError:
+                    pass
         settings = world.get_settings()
         settings.synchronous_mode = False
         settings.fixed_delta_seconds = None
