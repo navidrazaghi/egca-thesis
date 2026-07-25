@@ -78,6 +78,10 @@ class PrivilegedExpert:
     # cornering
     A_LAT = 3.0                # lateral acceleration budget (m/s^2)
     CURVE_LOOKAHEAD = 15.0     # distance over which curvature is anticipated (m)
+    # deadlock escape
+    CREEP_AFTER_STEPS = 80     # 8 s at 10 Hz standing still with no obligation
+    CREEP_SPEED = 1.5          # m/s
+    CREEP_MIN_GAP = 4.0        # only creep if there is at least this much space
     # lateral (pure pursuit)
     FULL_LOCK_ANGLE = 45.0     # heading error that saturates the steering (deg)
     STEER_SMOOTH = 0.6         # weight of the new command in the low-pass
@@ -106,6 +110,7 @@ class PrivilegedExpert:
         self.prev_idx = 0
         self.prev_steer = 0.0
         self.cleared_stops = set()
+        self.stopped_steps = 0
         self.stop_signs = list(world.get_actors().filter("*traffic.stop*"))
         self.lights_on_route = self._index_traffic_lights()
 
@@ -388,6 +393,20 @@ class PrivilegedExpert:
             follow = (lead_v or 0.0) + self.GAP_GAIN * gap_err
             target = min(target, max(0.0, follow))
 
+        # ---- deadlock escape.  A purely reactive expert has no way out of a
+        # standoff (an unprotected left turn with continuous oncoming traffic, or
+        # a queue whose leader is itself stuck): it waits forever and the route
+        # is thrown away.  After CREEP_AFTER seconds of standing still with no
+        # legal obligation to stop and some free space ahead, a slow creep is
+        # allowed, which resolves the great majority of these standoffs.
+        self.stopped_steps = self.stopped_steps + 1 if speed < 0.3 else 0
+        creeping = False
+        if (self.stopped_steps > self.CREEP_AFTER_STEPS
+                and light_d is None and not stop_sign
+                and (lead_d is None or lead_d > self.CREEP_MIN_GAP)):
+            target = max(target, self.CREEP_SPEED)
+            creeping = True
+
         # ---- longitudinal control.  Braking is proportional: an on/off brake
         # produced a saw-tooth of hard stops and re-accelerations that dragged
         # the average speed of the whole dataset down.
@@ -417,6 +436,7 @@ class PrivilegedExpert:
             "stop_sign": bool(stop_sign),
             "lead_distance": -1.0 if lead_d is None else float(lead_d),
             "n_ahead": int(n_ahead),
+            "creeping": bool(creeping),
             "progress": self.progress(),
             # advance along the plan since the previous step, used by the
             # collector to detect a permanent deadlock

@@ -112,6 +112,7 @@ class DataCollector:
             "stop_sign": bool(info["stop_sign"]),
             "lead_distance": float(info["lead_distance"]),
             "n_ahead": int(info.get("n_ahead", 0)),
+            "creeping": bool(info.get("creeping", False)),
             "noise": bool(noise),
         }
         with open(os.path.join(self.out_dir, "measurements", fid + ".json"), "w") as f:
@@ -246,6 +247,61 @@ class DataCollector:
         self.actors = []
 
 
+def spawn_walkers(client, world, n, cross_factor=0.35):
+    """Spawn `n` pedestrians with CARLA's navigation AI.
+
+    Without pedestrians the dataset contains no vulnerable road users at all:
+    the "pedestrian" class of the BEV target stays empty, the policy never sees
+    one during training, and it then collides with the pedestrians of the
+    safety-critical evaluation scenarios.  `cross_factor` is the share of
+    pedestrians allowed to cross outside crossings, which is what creates the
+    genuinely critical events.
+    """
+    wbps = world.get_blueprint_library().filter("walker.pedestrian.*")
+    world.set_pedestrians_cross_factor(cross_factor)
+    walkers, controllers = [], []
+    for _ in range(n):
+        loc = world.get_random_location_from_navigation()
+        if loc is None:
+            continue
+        bp = random.choice(wbps)
+        if bp.has_attribute("is_invincible"):
+            bp.set_attribute("is_invincible", "false")
+        w = world.try_spawn_actor(bp, carla.Transform(loc))
+        if w is None:
+            continue
+        walkers.append(w)
+    world.tick()
+    cbp = world.get_blueprint_library().find("controller.ai.walker")
+    for w in walkers:
+        c = world.try_spawn_actor(cbp, carla.Transform(), attach_to=w)
+        if c is None:
+            continue
+        controllers.append(c)
+    world.tick()
+    for c in controllers:
+        c.start()
+        target = world.get_random_location_from_navigation()
+        if target is not None:
+            c.go_to_location(target)
+        c.set_max_speed(random.uniform(0.9, 1.8))
+    return walkers, controllers
+
+
+def destroy_walkers(walkers, controllers):
+    for c in controllers:
+        try:
+            c.stop()
+            c.destroy()
+        except RuntimeError:
+            pass
+    for w in walkers:
+        try:
+            w.destroy()
+        except RuntimeError:
+            pass
+
+
 def clear_world(world):
     """Destroy vehicles, walkers and sensors left behind by an interrupted run.
 
@@ -280,7 +336,7 @@ def spawn_ego(world, bp, spawn_points):
 
 def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2,
                   max_seconds=MAX_ROUTE_SECONDS, min_route_m=MIN_ROUTE_METERS,
-                  tm_port=8000):
+                  tm_port=8000, n_walkers=40):
     """Collect one route.  Always leaves the simulator in asynchronous mode, even
     on failure: a server abandoned in synchronous mode waits forever for a tick
     that nobody sends, and every later client would hang."""
@@ -300,12 +356,14 @@ def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2
     vehicle, ego_i = spawn_ego(world, bp, spawn_points)
     others = [sp for i, sp in enumerate(spawn_points) if i != ego_i]
     world.tick()
-    traffic = []
+    traffic, peds = [], ([], [])
     try:
+        peds = spawn_walkers(client, world, n_walkers)
         _drive_route(client, world, vehicle, others, town, out_base,
                      route_id, weather, traffic_density, max_seconds,
                      min_route_m, tm_port, traffic)
     finally:
+        destroy_walkers(*peds)
         # Order matters: release the Traffic Manager before its vehicles are
         # destroyed, then destroy the actors in one batch, and only then put the
         # server back into asynchronous mode.
@@ -439,6 +497,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--first-route", type=int, default=0,
                     help="id of the first route (to resume an interrupted run)")
+    ap.add_argument("--walkers", type=int, default=40,
+                    help="pedestrians spawned per route (0 disables them)")
     ap.add_argument("--tm-port", type=int, default=8100,
                     help="Traffic Manager RPC port; must differ per simulator "
                          "instance when several run in parallel (CARLA's own "
@@ -455,7 +515,7 @@ def main():
         try:
             collect_route(client, args.town, args.output, route_id, w,
                           density, args.max_seconds, args.min_route_m,
-                          args.tm_port)
+                          args.tm_port, args.walkers)
         except (RuntimeError, IndexError) as e:
             # One bad route must not kill a multi-day collection.
             print(f"route {route_id} failed: {e}")
