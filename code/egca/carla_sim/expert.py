@@ -68,10 +68,16 @@ class PrivilegedExpert:
 
     # longitudinal
     KP_SPEED = 0.55
+    KP_BRAKE = 0.25            # proportional brake gain (per m/s of overspeed)
     MAX_THROTTLE = 0.75
-    BRAKE_MARGIN = 1.0         # brake if v exceeds target by this much (m/s)
+    BRAKE_MARGIN = 0.5         # brake if v exceeds target by this much (m/s)
     STOP_SPEED = 0.3           # below this the vehicle counts as stopped (m/s)
-    MAX_DECEL = 4.0            # assumed comfortable deceleration (m/s^2)
+    MAX_DECEL = 4.0            # emergency deceleration used for hazard reach
+    COMFORT_DECEL = 2.0        # deceleration used to plan stops (m/s^2)
+    STOP_LINE_MARGIN = 4.0     # stop this far before a stop line (m)
+    # cornering
+    A_LAT = 3.0                # lateral acceleration budget (m/s^2)
+    CURVE_LOOKAHEAD = 15.0     # distance over which curvature is anticipated (m)
     # lateral (pure pursuit)
     FULL_LOCK_ANGLE = 45.0     # heading error that saturates the steering (deg)
     STEER_SMOOTH = 0.6         # weight of the new command in the low-pass
@@ -95,11 +101,13 @@ class PrivilegedExpert:
         self.map = world.get_map()
         self.base_speed = base_speed
         self.plan = self._build_plan(targets)
+        self.cum = self._arc_lengths()
         self.idx = 0
         self.prev_idx = 0
         self.prev_steer = 0.0
         self.cleared_stops = set()
         self.stop_signs = list(world.get_actors().filter("*traffic.stop*"))
+        self.lights_on_route = self._index_traffic_lights()
 
     # ------------------------------------------------------------ route plan
     def _build_plan(self, targets):
@@ -116,10 +124,43 @@ class PrivilegedExpert:
             start = tgt
         return plan
 
+    def _arc_lengths(self):
+        """Cumulative arc length of the plan, so distances along the route are
+        O(1) lookups instead of repeated summations."""
+        cum = [0.0]
+        for i in range(len(self.plan) - 1):
+            cum.append(cum[-1] + math.dist(self.plan[i][:2], self.plan[i + 1][:2]))
+        return cum
+
+    def _index_traffic_lights(self):
+        """Attach every traffic light to the plan index of its stop line.
+
+        Reacting only inside a light's trigger volume (what `is_at_traffic_light`
+        reports) means the expert discovers a red light at the last moment and
+        stops abruptly.  Pre-indexing the lights along the route lets it brake
+        smoothly from a distance, which is both realistic and what the imitation
+        labels should contain.
+        """
+        out = []
+        for tl in self.world.get_actors().filter("*traffic_light*"):
+            try:
+                stops = tl.get_affected_lane_waypoints()
+            except (AttributeError, RuntimeError):
+                continue
+            for wp in stops:
+                lx, ly = wp.transform.location.x, wp.transform.location.y
+                best, best_d = None, 4.0
+                for i, p in enumerate(self.plan):
+                    d = math.dist((p[0], p[1]), (lx, ly))
+                    if d < best_d:
+                        best, best_d = i, d
+                if best is not None:
+                    out.append((best, tl))
+        return sorted(out, key=lambda t: t[0])
+
     @property
     def route_length(self):
-        return sum(math.dist(self.plan[i][:2], self.plan[i + 1][:2])
-                   for i in range(len(self.plan) - 1))
+        return self.cum[-1] if self.cum else 0.0
 
     def done(self):
         return self.idx >= len(self.plan) - 2
@@ -154,13 +195,20 @@ class PrivilegedExpert:
         return self._to_ego(self.plan[i][0], self.plan[i][1], tf)
 
     # ------------------------------------------------- policy-facing outputs
-    def nav_command(self):
-        """Discrete high-level command, announced COMMAND_HORIZON ahead."""
-        acc, i = 0.0, self.idx
-        while i + 1 < len(self.plan) and acc < COMMAND_HORIZON:
+    def nav_command(self, speed=None):
+        """Discrete high-level command for the next junction.
+
+        The announcement window scales with speed (a fixed 15 m window means a
+        slow vehicle spends most of its frames announcing a turn, which skews the
+        command distribution of the dataset), with a floor so the command is
+        always given early enough to be actionable.
+        """
+        horizon = COMMAND_HORIZON if speed is None else max(8.0, 2.0 * speed)
+        i = self.idx
+        while (i + 1 < len(self.plan)
+               and self.cum[i] - self.cum[self.idx] < horizon):
             if self.plan[i][3] != 3:            # a turn is coming up
                 return self.plan[i][3]
-            acc += math.dist(self.plan[i][:2], self.plan[i + 1][:2])
             i += 1
         return self.plan[min(i, len(self.plan) - 1)][3]
 
@@ -177,29 +225,55 @@ class PrivilegedExpert:
         return (limit / 3.6) if limit and limit > 1.0 else 8.33   # 30 km/h
 
     def _curvature_speed(self):
-        """Slow down for the upcoming curve: the sharper the heading change over
-        the next 20 m, the lower the allowed speed."""
+        """Physical cornering limit instead of hand-picked factors.
+
+        The heading change per unit arc length is the path curvature k = 1/R, and
+        a lateral acceleration budget A_LAT gives v_max = sqrt(A_LAT / k).  The
+        maximum curvature over the next CURVE_LOOKAHEAD metres is used, so the
+        vehicle is already slow when it reaches the corner.
+        """
         i0 = self.idx
-        acc, i = 0.0, i0
-        while i + 1 < len(self.plan) and acc < 20.0:
-            acc += math.dist(self.plan[i][:2], self.plan[i + 1][:2])
+        kappa_max = 0.0
+        i = i0
+        while (i + 1 < len(self.plan)
+               and self.cum[i] - self.cum[i0] < self.CURVE_LOOKAHEAD):
+            ds = math.dist(self.plan[i][:2], self.plan[i + 1][:2])
+            if ds > 1e-3:
+                dpsi = abs(_yaw_diff(self.plan[i][2], self.plan[i + 1][2]))
+                kappa_max = max(kappa_max, math.radians(dpsi) / ds)
             i += 1
-        turn = abs(_yaw_diff(self.plan[i0][2], self.plan[i][2]))
-        if turn < 10.0:
+        if kappa_max < 1e-3:                            # essentially straight
             return self.base_speed
-        if turn < 45.0:
-            return 0.7 * self.base_speed
-        return 0.45 * self.base_speed                   # junction turn
+        return min(self.base_speed, math.sqrt(self.A_LAT / kappa_max))
 
     # --------------------------------------------------------------- hazards
-    def _light_hazard(self):
-        """True while a red or yellow light applies to the ego vehicle."""
-        if carla is None or not self.vehicle.is_at_traffic_light():
-            return False
-        light = self.vehicle.get_traffic_light()
-        if light is None:
-            return False
-        return light.get_state() != carla.TrafficLightState.Green
+    def _light_distance(self, speed):
+        """Distance along the route to the stop line of the next red/yellow
+        light, or None if the way is clear.
+
+        If the closest light on the route is green, no constraint is returned:
+        the vehicle will have passed it before reaching any light behind it.
+        """
+        if carla is None:
+            return None
+        # a light whose trigger volume we are already inside
+        if self.vehicle.is_at_traffic_light():
+            tl = self.vehicle.get_traffic_light()
+            if tl is not None and tl.get_state() != carla.TrafficLightState.Green:
+                return 0.0
+        horizon = max(15.0, speed ** 2 / (2.0 * self.COMFORT_DECEL) + 2.0 * speed)
+        for pi, tl in self.lights_on_route:
+            if pi <= self.idx:
+                continue
+            d = self.cum[pi] - self.cum[self.idx]
+            if d > horizon:
+                return None
+            try:
+                green = tl.get_state() == carla.TrafficLightState.Green
+            except RuntimeError:
+                return None
+            return None if green else d
+        return None
 
     def _stop_sign_hazard(self, tf, speed):
         """True until the vehicle has come to a full stop for the stop sign
@@ -280,10 +354,16 @@ class PrivilegedExpert:
         # ---- desired speed
         target = min(self.base_speed, 0.9 * self._posted_speed(),
                      self._curvature_speed())
-        red_light = self._light_hazard()
+        light_d = self._light_distance(speed)
         stop_sign = self._stop_sign_hazard(tf, speed)
         lead_d, lead_v = self._actor_hazard(tf, speed)
-        if red_light or stop_sign:
+        if light_d is not None:
+            # brake profile that reaches zero STOP_LINE_MARGIN before the line
+            target = min(target, math.sqrt(
+                2.0 * self.COMFORT_DECEL
+                * max(0.0, light_d - self.STOP_LINE_MARGIN)))
+        red_light = light_d is not None and light_d < 2.0 * self.STOP_LINE_MARGIN
+        if stop_sign:
             target = 0.0
         elif lead_d is not None:
             # Car-following law: aim for a 1.5 s time headway on top of a 5 m
@@ -297,12 +377,15 @@ class PrivilegedExpert:
             follow = (lead_v or 0.0) + self.GAP_GAIN * gap_err
             target = min(target, max(0.0, follow))
 
-        # ---- longitudinal control
+        # ---- longitudinal control.  Braking is proportional: an on/off brake
+        # produced a saw-tooth of hard stops and re-accelerations that dragged
+        # the average speed of the whole dataset down.
         err = target - speed
-        if target < self.STOP_SPEED:
-            throttle, brake = 0.0, 1.0
+        if target < self.STOP_SPEED and speed < 0.5:
+            throttle, brake = 0.0, 1.0                   # hold at a stop
         elif err < -self.BRAKE_MARGIN:
-            throttle, brake = 0.0, 1.0
+            throttle = 0.0
+            brake = float(np.clip(self.KP_BRAKE * (-err), 0.15, 1.0))
         else:
             throttle = float(np.clip(self.KP_SPEED * err, 0.0, self.MAX_THROTTLE))
             brake = 0.0
@@ -316,7 +399,7 @@ class PrivilegedExpert:
         self.prev_steer = steer
 
         info = {
-            "command": self.nav_command(),
+            "command": self.nav_command(speed),
             "goal": self.sparse_goal(),
             "target_speed": target,
             "red_light": bool(red_light),
