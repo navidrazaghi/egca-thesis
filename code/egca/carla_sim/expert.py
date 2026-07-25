@@ -82,6 +82,7 @@ class PrivilegedExpert:
     CREEP_AFTER_STEPS = 80     # 8 s at 10 Hz standing still with no obligation
     CREEP_SPEED = 1.5          # m/s
     CREEP_MIN_GAP = 4.0        # only creep if there is at least this much space
+    OFF_ROUTE_DIST = 6.0       # beyond this the plan cursor is re-localized (m)
     # lateral (pure pursuit)
     FULL_LOCK_ANGLE = 45.0     # heading error that saturates the steering (deg)
     STEER_SMOOTH = 0.6         # weight of the new command in the low-pass
@@ -111,6 +112,7 @@ class PrivilegedExpert:
         self.prev_steer = 0.0
         self.cleared_stops = set()
         self.stopped_steps = 0
+        self.off_route = 0.0
         self.stop_signs = list(world.get_actors().filter("*traffic.stop*"))
         self.lights_on_route = self._index_traffic_lights()
 
@@ -182,20 +184,46 @@ class PrivilegedExpert:
         return c * dx + s * dy, -(-s * dx + c * dy)
 
     def _advance(self, tf):
-        """Move the plan cursor to the closest point within a forward window."""
+        """Move the plan cursor to the closest point within a forward window.
+
+        If the vehicle ends up far from the plan -- it overshot a junction, was
+        pushed off the lane by traffic or by the injected steering noise -- the
+        cursor is re-localized over the whole plan.  Without this the cursor
+        lags behind, the look-ahead point falls *behind* the vehicle, the
+        pure-pursuit angle saturates at full lock and the vehicle stalls against
+        a kerb: the observed symptom was a route stopping dead at exactly the
+        same 57% of its length on every attempt.
+        """
+        ego = (tf.location.x, tf.location.y)
         best, best_d = self.idx, float("inf")
         for i in range(self.idx, min(self.idx + 80, len(self.plan))):
-            d = math.dist((self.plan[i][0], self.plan[i][1]),
-                          (tf.location.x, tf.location.y))
+            d = math.dist((self.plan[i][0], self.plan[i][1]), ego)
             if d < best_d:
                 best, best_d = i, d
+        if best_d > self.OFF_ROUTE_DIST:
+            for i in range(len(self.plan)):
+                d = math.dist((self.plan[i][0], self.plan[i][1]), ego)
+                if d < best_d:
+                    best, best_d = i, d
         self.idx = best
+        self.off_route = best_d
 
-    def _point_at(self, distance, tf):
-        """Ego-frame point `distance` metres ahead along the plan."""
+    def _point_at(self, distance, tf, min_forward=0.5):
+        """Ego-frame point `distance` metres ahead along the plan.
+
+        The returned point is guaranteed to lie in front of the vehicle: after
+        walking the requested arc length, the cursor keeps advancing while the
+        candidate is still behind.  A target behind the car would otherwise
+        saturate the steering command instead of steering towards the route.
+        """
         acc, i = 0.0, self.idx
         while i + 1 < len(self.plan) and acc < distance:
             acc += math.dist(self.plan[i][:2], self.plan[i + 1][:2])
+            i += 1
+        for _ in range(200):
+            x, y = self._to_ego(self.plan[i][0], self.plan[i][1], tf)
+            if x > min_forward or i + 1 >= len(self.plan):
+                return x, y
             i += 1
         return self._to_ego(self.plan[i][0], self.plan[i][1], tf)
 
@@ -437,6 +465,7 @@ class PrivilegedExpert:
             "lead_distance": -1.0 if lead_d is None else float(lead_d),
             "n_ahead": int(n_ahead),
             "creeping": bool(creeping),
+            "off_route_m": float(self.off_route),
             "progress": self.progress(),
             # advance along the plan since the previous step, used by the
             # collector to detect a permanent deadlock

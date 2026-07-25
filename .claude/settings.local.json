@@ -24,7 +24,8 @@
       "Bash(timeout 900 python -c ' *)",
       "Bash(python -m py_compile egca/carla_sim/evaluate.py egca/carla_sim/collect_data.py egca/models/*.py egca/training/*.py egca/control/pid.py)",
       "Bash(timeout 900 python smoke_test.py)",
-      "Bash(python -m py_compile egca/carla_sim/collect_data.py)"
+      "Bash(python -m py_compile egca/carla_sim/collect_data.py)",
+      "Bash(python -m py_compile egca/carla_sim/collect_data.py egca/carla_sim/expert.py egca/data/build_labels.py egca/data/inspect.py)"
     ]
   }
 }

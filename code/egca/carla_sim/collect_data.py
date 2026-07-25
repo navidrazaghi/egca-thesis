@@ -38,7 +38,7 @@ STUCK_SECONDS = 25.0         # abandon a gridlocked route instead of recording i
 # both unrealistic and risky: 0.4 gridlocks a small town such as Town01 (one dry
 # run produced 8 usable frames out of 120), while a fixed low value never
 # exercises car following.
-DENSITY_RANGE = (0.08, 0.25)
+DENSITY_RANGE = (0.10, 0.30)
 NOISE_PROB = 0.01            # probability of starting a perturbation burst
 NOISE_STEPS = 5              # length of a burst (0.5 s at 10 Hz)
 NOISE_STD = 0.15             # std of the injected steering perturbation
@@ -247,7 +247,7 @@ class DataCollector:
         self.actors = []
 
 
-def spawn_walkers(client, world, n, cross_factor=0.35):
+def spawn_walkers(client, world, n, cross_factor=0.35, near=None, radius=45.0):
     """Spawn `n` pedestrians with CARLA's navigation AI.
 
     Without pedestrians the dataset contains no vulnerable road users at all:
@@ -256,13 +256,24 @@ def spawn_walkers(client, world, n, cross_factor=0.35):
     safety-critical evaluation scenarios.  `cross_factor` is the share of
     pedestrians allowed to cross outside crossings, which is what creates the
     genuinely critical events.
+
+    `near` is a list of (x, y) route points; pedestrians are then only accepted
+    within `radius` of the route.  Spreading them uniformly over a whole town
+    puts almost none inside the 32 m x 32 m perception region -- measured 0.01% of
+    the BEV target, i.e. the pedestrian class stays effectively untrained.
     """
     wbps = world.get_blueprint_library().filter("walker.pedestrian.*")
     world.set_pedestrians_cross_factor(cross_factor)
     walkers, controllers = [], []
-    for _ in range(n):
+    attempts = 0
+    while len(walkers) < n and attempts < 30 * n:
+        attempts += 1
         loc = world.get_random_location_from_navigation()
         if loc is None:
+            continue
+        if near is not None and not any(
+                (loc.x - px) ** 2 + (loc.y - py) ** 2 < radius ** 2
+                for px, py in near):
             continue
         bp = random.choice(wbps)
         if bp.has_attribute("is_invincible"):
@@ -336,7 +347,7 @@ def spawn_ego(world, bp, spawn_points):
 
 def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2,
                   max_seconds=MAX_ROUTE_SECONDS, min_route_m=MIN_ROUTE_METERS,
-                  tm_port=8000, n_walkers=40):
+                  tm_port=8000, n_walkers=120):
     """Collect one route.  Always leaves the simulator in asynchronous mode, even
     on failure: a server abandoned in synchronous mode waits forever for a tick
     that nobody sends, and every later client would hang."""
@@ -358,10 +369,9 @@ def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2
     world.tick()
     traffic, peds = [], ([], [])
     try:
-        peds = spawn_walkers(client, world, n_walkers)
         _drive_route(client, world, vehicle, others, town, out_base,
                      route_id, weather, traffic_density, max_seconds,
-                     min_route_m, tm_port, traffic)
+                     min_route_m, tm_port, traffic, n_walkers, peds)
     finally:
         destroy_walkers(*peds)
         # Order matters: release the Traffic Manager before its vehicles are
@@ -390,7 +400,7 @@ def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2
 
 def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
                  weather, traffic_density, max_seconds, min_route_m, tm_port,
-                 traffic):
+                 traffic, n_walkers=0, peds=None):
     # background traffic under CARLA's own autopilot.  Each simulator instance
     # needs its own Traffic Manager port, otherwise a second instance fails to
     # bind (the TM RPC server lives on the host network).
@@ -429,6 +439,14 @@ def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
     if expert is None or expert.route_length < 50.0:
         print("  could not plan a route, skipping")
         return
+    # Pedestrians are spawned only now, so they can be placed along the planned
+    # route instead of uniformly over the town.
+    if n_walkers and peds is not None:
+        route_pts = [(p[0], p[1]) for p in expert.plan[::20]]
+        w, c = spawn_walkers(client, world, n_walkers, near=route_pts)
+        peds[0].extend(w)
+        peds[1].extend(c)
+        print(f"  {len(w)} pedestrians along the route")
     out_dir = os.path.join(out_base, f"route_{route_id:03d}_{weather}")
     os.makedirs(out_dir, exist_ok=True)
     collector = DataCollector(world, vehicle, out_dir)
@@ -497,7 +515,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--first-route", type=int, default=0,
                     help="id of the first route (to resume an interrupted run)")
-    ap.add_argument("--walkers", type=int, default=40,
+    ap.add_argument("--walkers", type=int, default=120,
                     help="pedestrians spawned per route (0 disables them)")
     ap.add_argument("--tm-port", type=int, default=8100,
                     help="Traffic Manager RPC port; must differ per simulator "
