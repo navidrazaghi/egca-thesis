@@ -132,7 +132,8 @@ def main():
     depth_zero = 0
     n = 0
     # why was the expert slow?  split the frames by the reason it had to brake
-    groups = {"red light": [], "stop sign": [], "lead vehicle": [], "free": []}
+    groups = {"red light": [], "stop sign": [], "lead vehicle": [],
+              "lead walker": [], "free": []}
     leads, ahead = [], []
     for r, f in pool:
         with open(os.path.join(r, "measurements", f + ".json")) as fh:
@@ -150,7 +151,8 @@ def main():
         elif m["stop_sign"]:
             groups["stop sign"].append(m["speed"])
         elif m["lead_distance"] > 0:
-            groups["lead vehicle"].append(m["speed"])
+            key = "lead walker" if m.get("lead_is_walker") else "lead vehicle"
+            groups[key].append(m["speed"])
             leads.append(m["lead_distance"])
         else:
             groups["free"].append(m["speed"])

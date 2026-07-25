@@ -112,6 +112,7 @@ class DataCollector:
             "stop_sign": bool(info["stop_sign"]),
             "lead_distance": float(info["lead_distance"]),
             "n_ahead": int(info.get("n_ahead", 0)),
+            "lead_is_walker": bool(info.get("lead_is_walker", False)),
             "creeping": bool(info.get("creeping", False)),
             "noise": bool(noise),
         }
@@ -347,7 +348,7 @@ def spawn_ego(world, bp, spawn_points):
 
 def collect_route(client, town, out_base, route_id, weather, traffic_density=0.2,
                   max_seconds=MAX_ROUTE_SECONDS, min_route_m=MIN_ROUTE_METERS,
-                  tm_port=8000, n_walkers=120):
+                  tm_port=8000, n_walkers=60):
     """Collect one route.  Always leaves the simulator in asynchronous mode, even
     on failure: a server abandoned in synchronous mode waits forever for a tick
     that nobody sends, and every later client would hang."""
@@ -515,7 +516,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--first-route", type=int, default=0,
                     help="id of the first route (to resume an interrupted run)")
-    ap.add_argument("--walkers", type=int, default=120,
+    ap.add_argument("--walkers", type=int, default=60,
                     help="pedestrians spawned per route (0 disables them)")
     ap.add_argument("--tm-port", type=int, default=8100,
                     help="Traffic Manager RPC port; must differ per simulator "
