@@ -458,7 +458,8 @@ def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
     os.makedirs(out_dir, exist_ok=True)
     collector = DataCollector(world, vehicle, out_dir)
     scenarios = ScriptedScenarios(world, vehicle, expert.plan, expert.cum,
-                                  every_m=scenario_every_m, rng=random)
+                                  every_m=scenario_every_m, rng=random,
+                                  carla_map=expert.map)
     print(f"collecting {town} route {route_id} weather={weather} "
           f"({expert.route_length:.0f} m, "
           f"{len(scenarios.pending)} scripted scenarios) ...")

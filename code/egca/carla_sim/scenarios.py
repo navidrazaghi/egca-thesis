@@ -41,12 +41,19 @@ BRAKE_STRENGTH = 1.0
 
 
 class _Scenario:
-    """One staged event: spawn actors, wait for the ego, act, then clean up."""
+    """One staged event: spawn actors, wait for the ego, act, then clean up.
 
-    def __init__(self, kind, idx, world, plan):
+    `carla_map` and `blueprints` are passed in rather than fetched: every call to
+    `world.get_map()` re-downloads and re-parses the OpenDRIVE map, and doing it
+    once per staged scenario stalled the simulator until the RPC timed out.
+    """
+
+    def __init__(self, kind, idx, world, plan, carla_map, blueprints):
         self.kind = kind
         self.idx = idx                      # plan index of the trigger point
         self.world = world
+        self.map = carla_map
+        self.bl = blueprints
         self.plan = plan
         self.actors = []
         self.state = "pending"              # pending -> staged -> running -> done
@@ -64,7 +71,7 @@ class _Scenario:
 
     def _trigger_waypoint(self):
         x, y, _, _ = self.plan[self.idx]
-        return self.world.get_map().get_waypoint(carla.Location(x=x, y=y))
+        return self.map.get_waypoint(carla.Location(x=x, y=y))
 
     def _stage_pedestrian_crossing(self):
         wp = self._trigger_waypoint()
@@ -73,8 +80,7 @@ class _Scenario:
         side = wp.lane_width * 0.5 + 1.5
         loc = wp.transform.location + carla.Location(x=right.x * side,
                                                      y=right.y * side, z=1.0)
-        bps = self.world.get_blueprint_library().filter("walker.pedestrian.*")
-        bp = random.choice(bps)
+        bp = random.choice(self.bl.filter("walker.pedestrian.*"))
         if bp.has_attribute("is_invincible"):
             bp.set_attribute("is_invincible", "false")
         walker = self.world.try_spawn_actor(bp, carla.Transform(loc))
@@ -94,8 +100,7 @@ class _Scenario:
             return False
         tf = ahead[0].transform
         tf.location.z += 0.5
-        bp = random.choice(
-            self.world.get_blueprint_library().filter("vehicle.*"))
+        bp = random.choice(self.bl.filter("vehicle.*"))
         veh = self.world.try_spawn_actor(bp, tf)
         if veh is None:
             return False
@@ -133,8 +138,7 @@ class _Scenario:
             return False
         tf = back[0].transform
         tf.location.z += 0.5
-        bp = random.choice(
-            self.world.get_blueprint_library().filter("vehicle.*"))
+        bp = random.choice(self.bl.filter("vehicle.*"))
         veh = self.world.try_spawn_actor(bp, tf)
         if veh is None:
             return False
@@ -183,12 +187,15 @@ class ScriptedScenarios:
     """Places scenarios along a route and drives them as the ego passes by."""
 
     def __init__(self, world, vehicle, plan, cum, every_m=120.0, rng=None,
-                 kinds=KINDS):
+                 kinds=KINDS, carla_map=None):
         self.world = world
         self.vehicle = vehicle
         self.plan = plan
         self.cum = cum
         self.rng = rng or random
+        # fetched once; see the note in _Scenario
+        self.map = carla_map or world.get_map()
+        self.bl = world.get_blueprint_library()
         self.pending = []
         self.active = None
         self.fired = []                      # (kind, plan index) actually fired
@@ -199,7 +206,7 @@ class ScriptedScenarios:
         while d < cum[-1] - 40.0:
             idx = self._index_at(d)
             self.pending.append(_Scenario(self.rng.choice(list(kinds)), idx,
-                                          world, plan))
+                                          world, plan, self.map, self.bl))
             d += every_m * self.rng.uniform(0.7, 1.3)
 
     def _index_at(self, distance):
