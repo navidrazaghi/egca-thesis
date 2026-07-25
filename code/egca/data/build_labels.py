@@ -62,7 +62,7 @@ def to_ego(x, y, ref):
 STOP_THRESHOLD = 0.5      # 2 s path below this counts as standing still (m)
 
 
-def build_route(route, horizon, max_step=25.0, keep_edges=2):
+def build_route(route, horizon, max_step=25.0, keep_edges=3):
     """Write `labels/*.json` for one route; returns (written, skipped, stats).
 
     Standstill resampling (Table 5-1): in a long stop only the beginning and the
@@ -101,10 +101,14 @@ def build_route(route, horizon, max_step=25.0, keep_edges=2):
         cand[i] = (wps, sum(steps))
 
     # ---- pass 2: thin out the interior of every standstill run.
-    # Frames carrying a turn command are never dropped: vehicles stand still
-    # precisely at junctions, which is also where the only non-lane-follow
-    # commands occur, so blind thinning erases the conditional signal the policy
-    # has to learn (measured: it took the turn commands of a route to zero).
+    #
+    # An earlier version exempted frames carrying a turn command, on the theory
+    # that vehicles stand still at junctions and blind thinning would erase the
+    # conditional signal.  That exemption backfired: waiting at a red light
+    # before a turn produced a hundred identical frames all carrying the turn
+    # command, none of which could be dropped, and 30% of the dataset became a
+    # stationary car.  The conditional signal is in fact carried by the *moving*
+    # frames that approach and cross the junction, which are never thinned here.
     idxs = sorted(cand)
     drop = set()
     run = []
@@ -114,8 +118,7 @@ def build_route(route, horizon, max_step=25.0, keep_edges=2):
             run.append(i)
             continue
         if len(run) > 2 * keep_edges:
-            interior = run[keep_edges:len(run) - keep_edges]
-            drop.update(j for j in interior if cmds[j] == 3)
+            drop.update(run[keep_edges:len(run) - keep_edges])
         run = []
 
     written = stopped = 0
@@ -140,7 +143,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="dataset")
     ap.add_argument("--horizon", type=int, default=4)
-    ap.add_argument("--keep-edges", type=int, default=2,
+    ap.add_argument("--keep-edges", type=int, default=3,
                     help="frames kept at each end of a standstill; use a large "
                          "value to disable standstill resampling")
     args = ap.parse_args()

@@ -36,7 +36,8 @@ KINDS = ("pedestrian_crossing", "lead_brake", "junction_violation")
 ARM_DIST = 60.0            # start staging the scenario at this distance (m)
 TRIGGER_DIST = 14.0        # fire it when the ego is this close (m)
 LEAD_TRIGGER_DIST = 13.0   # ... or this close to the lead vehicle itself
-STAGE_TIMEOUT_S = 20.0     # a staged scenario that never fires is cancelled
+STAGE_TIMEOUT_S = 45.0     # time *without approach* before a staged scenario is
+                           # cancelled (see _Scenario.hold)
 DURATION_S = 8.0           # how long the scripted action lasts
 WALKER_SPEED = 1.6         # m/s of the crossing pedestrian
 LEAD_CRUISE = 0.45         # throttle of the lead vehicle before it brakes
@@ -62,6 +63,7 @@ class _Scenario:
         self.state = "pending"              # pending -> staged -> running -> done
         self.timer = 0.0
         self.staged_for = 0.0
+        self.closest_gap = float("inf")
         self.vehicle = None
         self.walker = None
         self.reason = ""
@@ -170,7 +172,7 @@ class _Scenario:
         return True
 
     # -------------------------------------------------------------- waiting
-    def hold(self, dt):
+    def hold(self, dt, gap=None):
         """Called on every step while the scenario is staged but not yet fired.
 
         The lead vehicle has to keep rolling.  Staged motionless it is simply a
@@ -178,7 +180,15 @@ class _Scenario:
         enough to trigger anything, and the two wait for each other until the
         route is aborted -- which is precisely what the first version did (three
         of three routes lost, zero scenarios fired).
+
+        The staleness timer counts time *without approach*, not wall-clock time:
+        an ego that queues at a red light on its way to the trigger is still
+        coming, and a fixed 20 s budget expired most scenarios before the ego
+        ever arrived.
         """
+        if gap is not None and gap < self.closest_gap - 1.0:
+            self.closest_gap = gap
+            self.staged_for = 0.0
         self.staged_for += dt
         if self.kind == "lead_brake" and self.vehicle is not None:
             try:
@@ -321,7 +331,7 @@ class ScriptedScenarios:
                     self.failures.append((sc.kind, sc.reason))
                     self.pending.remove(sc)
             elif sc.state == "staged":
-                sc.hold(dt)
+                sc.hold(dt, gap)
                 if sc.ready(ego_loc, gap):
                     sc.fire()
                     self.pending.remove(sc)
