@@ -42,7 +42,11 @@
       "Bash(python -m py_compile egca/models/fusion.py egca/models/model.py)",
       "Bash(python -m py_compile egca/training/train.py)",
       "Bash(python -m py_compile egca/training/train.py egca/data/dataset.py)",
-      "Bash(timeout 600 python smoke_test.py)"
+      "Bash(timeout 600 python smoke_test.py)",
+      "Bash(ssh -o BatchMode=yes razzaghi@213.233.184.253 'tmux ls 2>&1; echo \"--- containers\"; docker ps --format \"{{.Names}} {{.Status}}\"; echo \"--- counts\"; for t in Town01 Town02 Town03 Town04 Town06; do printf \"%-8s routes=%-4s frames=%s\\\\n\" $t $\\(ls -d ~/thesis/code/dataset/$t/route_* 2>/dev/null | wc -l\\) $\\(find ~/thesis/code/dataset/$t -path \"*measurements*\" -name \"*.json\" 2>/dev/null | wc -l\\); done; echo \"--- git\"; cd ~/thesis && git log --oneline -1')",
+      "Bash(git -c user.name=\"Navid Razaghi\" -c user.email=\"omidrazzaghi2000@gmail.com\" add -A)",
+      "Bash(git -c user.name=\"Navid Razaghi\" -c user.email=\"omidrazzaghi2000@gmail.com\" commit -q -m \"Fix octal route-index parsing in the supervisor; refuse to write into a populated route directory; add dataset integrity checker\")",
+      "Bash(git push *)"
     ]
   }
 }

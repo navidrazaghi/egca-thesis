@@ -458,7 +458,20 @@ def _drive_route(client, world, vehicle, spawn_points, town, out_base, route_id,
         peds[0].extend(w)
         peds[1].extend(c)
         print(f"  {len(w)} pedestrians along the route")
+    # Never write into a directory that already holds frames: the frame counter
+    # restarts at zero, so a collision silently overwrites part of an earlier
+    # route and mixes two runs into one directory.  A resumed collection can
+    # always be given a wrong starting index, so the guard belongs here rather
+    # than in the supervisor script.
     out_dir = os.path.join(out_base, f"route_{route_id:03d}_{weather}")
+    bump = route_id
+    while os.path.isdir(os.path.join(out_dir, "measurements")) and \
+            os.listdir(os.path.join(out_dir, "measurements")):
+        bump += 1
+        out_dir = os.path.join(out_base, f"route_{bump:03d}_{weather}")
+    if bump != route_id:
+        print(f"  route {route_id:03d} already populated, writing to "
+              f"route_{bump:03d} instead")
     os.makedirs(out_dir, exist_ok=True)
     collector = DataCollector(world, vehicle, out_dir)
     scenarios = ScriptedScenarios(world, vehicle, expert.plan, expert.cum,
