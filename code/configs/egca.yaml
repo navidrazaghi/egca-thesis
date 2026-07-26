@@ -14,6 +14,8 @@ model:
     max_points_per_pillar: 24
     pillar_feat_dim: 64
   fusion:
+    # egca | concat | late | camera_only | lidar_only   (Tables 5-4, 5-5)
+    mode: egca
     num_blocks: 4                 # L
     num_heads: 4                  # H
     ffn_dim: 512
@@ -51,6 +53,9 @@ control:
 data:
   root: dataset/
   towns_train: [Town01, Town02, Town03, Town04, Town06]
-  towns_val: [Town05]
+  # Town05 is collected by nobody: it is the unseen town of the closed-loop
+  # generalization test (Appendix C).  Validation uses held-out routes instead.
+  towns_unseen: [Town05]
+  val_every_n_routes: 20
   seg_size: [128, 128]
   depth_size: [80, 352]           # half-resolution depth target

@@ -450,8 +450,69 @@ def fig5_7():
     plt.close(fig)
 
 
+# ----------------------------------------------------------------------------
+# Fig 5.7 — measured scaling of linear vs full cross-attention
+# ----------------------------------------------------------------------------
+SCALING_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "code", "results", "attention_scaling.json")
+
+
+def fig5_scaling(path=SCALING_JSON):
+    """Latency and training memory against the number of LiDAR tokens.
+
+    Turns the break-even condition of Sec. 3-4-4 from an inequality into a
+    measurement.  Requires `python -m egca.eval.attention_scaling` to have been
+    run on an idle GPU; without that file the figure is skipped rather than
+    drawn from invented numbers.
+    """
+    import json
+    if not os.path.exists(path):
+        print(f"skip fig5_scaling: {path} not found "
+              "(run egca.eval.attention_scaling on the GPU first)")
+        return
+    with open(path) as f:
+        data = json.load(f)
+    rows = data["rows"]
+    n = [r["n_lidar"] for r in rows]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(6.8, 2.9))
+
+    ax1.plot(n, [r["fusion_full_ms"] for r in rows], "-s", color=C4, lw=1.6,
+             ms=5, label="full attention")
+    ax1.plot(n, [r["fusion_linear_ms"] for r in rows], "-o", color=C2, lw=1.8,
+             ms=5, label="linear attention")
+    ax1.set_xscale("log", base=2)
+    ax1.set_yscale("log")
+    ax1.set_xlabel("LiDAR tokens $N_l$")
+    ax1.set_ylabel("fusion module latency (ms)")
+    ax1.legend(fontsize=8, framealpha=0.9)
+    if data.get("breakeven_latency"):
+        ax1.axvline(data["breakeven_latency"], color=GRAY, ls=":", lw=1.2)
+        ax1.annotate("break-even", (data["breakeven_latency"], ax1.get_ylim()[0]),
+                     xytext=(4, 6), textcoords="offset points", fontsize=7.5,
+                     color=GRAY, rotation=90)
+
+    mem_full = [r["mem_full_MB"] for r in rows]
+    mem_lin = [r["mem_linear_MB"] for r in rows]
+    if all(m == m for m in mem_full):            # not NaN (i.e. a GPU was used)
+        ax2.plot(n, mem_full, "-s", color=C4, lw=1.6, ms=5, label="full attention")
+        ax2.plot(n, mem_lin, "-o", color=C2, lw=1.8, ms=5, label="linear attention")
+        ax2.set_xscale("log", base=2)
+        ax2.set_yscale("log")
+        ax2.set_xlabel("LiDAR tokens $N_l$")
+        ax2.set_ylabel("peak training memory (MB)")
+        ax2.legend(fontsize=8, framealpha=0.9)
+    for ax in (ax1, ax2):
+        ax.axvline(4096, color=C1, ls="--", lw=1.0, alpha=0.7)
+    ax1.annotate("operating point", (4096, ax1.get_ylim()[1]),
+                 xytext=(-52, -12), textcoords="offset points", fontsize=7.5,
+                 color=C1)
+    fig.savefig(os.path.join(OUT, "fig5_8_scaling.png"))
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     for fn in [fig1_1, fig2_1, fig3_1, fig3_2, fig4_1, fig4_2,
-               fig5_1, fig5_2, fig5_3, fig5_4, fig5_5, fig5_6, fig5_7]:
+               fig5_1, fig5_2, fig5_3, fig5_4, fig5_5, fig5_6, fig5_7,
+               fig5_scaling]:
         fn()
         print("done", fn.__name__)

@@ -37,6 +37,24 @@ def test_forward():
     print(f"   waypoints shape: {out['waypoints'].shape}, gate mean: {out['gate'].mean():.3f}")
 
 
+def test_fusion_modes():
+    print("3b. Fusion modes (Tables 5-4 / 5-5 baselines)...")
+    from egca.models.fusion import EGCAFusion
+    base = load_config("configs/egca.yaml", [])
+    ds = CarlaDrivingDataset(base, [], synthetic_len=4)
+    batch = collate([ds[i] for i in range(2)])
+    for mode in EGCAFusion.MODES:
+        cfg = load_config("configs/egca.yaml", [f"model.fusion.mode={mode}"])
+        model = EGCAPolicy(cfg, sensor_dropout=0.15).train()
+        criterion = UncertaintyWeightedLoss(True, True)
+        out = model(batch)
+        loss, _ = criterion(out, batch)
+        loss.backward()                       # every mode must be trainable
+        assert out["waypoints"].shape == (2, cfg.model.decoder.horizon, 2)
+        n = sum(p.numel() for p in model.parameters()) / 1e6
+        print(f"   {mode:<12} {n:5.2f} M  loss {float(loss):.3f}")
+
+
 def test_loss():
     print("3. Loss computation...")
     cfg = load_config("configs/egca.yaml", [])
@@ -93,6 +111,7 @@ if __name__ == "__main__":
     print("EGCA Smoke Test\n" + "="*50)
     test_model()
     test_forward()
+    test_fusion_modes()
     test_loss()
     test_control()
     test_metrics()

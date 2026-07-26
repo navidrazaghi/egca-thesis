@@ -64,16 +64,29 @@ def main():
     ap.add_argument("--synthetic", type=int, default=0,
                     help="use N random samples instead of real data (smoke test)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="seed for the run; the three-seed protocol of Sec. 5-2 "
+                         "needs this to vary initialization and data order")
     args = ap.parse_args()
 
     cfg = load_config(args.config, args.overrides)
     device = torch.device(args.device)
-    torch.manual_seed(0)
+    import random as _random
+    import numpy as _np
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    _np.random.seed(args.seed)
+    _random.seed(args.seed)
 
+    # Validation comes from held-out routes of the training towns; the unseen
+    # town is never touched here (see CarlaDrivingDataset).
     tr = CarlaDrivingDataset(cfg, cfg.data.towns_train, augment=True,
-                             synthetic_len=args.synthetic)
-    va = CarlaDrivingDataset(cfg, cfg.data.towns_val,
-                             synthetic_len=max(args.synthetic // 4, 0))
+                             synthetic_len=args.synthetic, split="train")
+    va = CarlaDrivingDataset(cfg, cfg.data.towns_train,
+                             synthetic_len=max(args.synthetic // 4, 0),
+                             split="val")
+    if not args.synthetic:
+        print(f"train frames {len(tr)}   val frames {len(va)}")
     bs = min(cfg.train.batch_size, len(tr))
     if args.synthetic:
         # smoke test: the configured batch (Table 5-2) assumes 4 x 24 GB GPUs;

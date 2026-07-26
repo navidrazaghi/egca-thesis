@@ -24,7 +24,16 @@ from ..models.lidar_encoder import pillarize
 
 
 class CarlaDrivingDataset(Dataset):
-    def __init__(self, cfg, towns, augment=False, synthetic_len=0):
+    """Frames of the collected routes.
+
+    The validation split is taken from held-out *routes* of the training towns,
+    never from a held-out town: Town05 is reserved for the closed-loop
+    generalization measurement of Appendix C and must not influence training or
+    model selection in any way -- not even as a validation signal.  Routes are
+    split by index, so the split is identical across seeds and reruns.
+    """
+
+    def __init__(self, cfg, towns, augment=False, synthetic_len=0, split="train"):
         self.cfg = cfg
         self.augment = augment
         self.synthetic_len = synthetic_len
@@ -32,11 +41,16 @@ class CarlaDrivingDataset(Dataset):
         if synthetic_len:            # random data for smoke tests / CI
             return
         root = cfg.data.root
+        val_every = int(getattr(cfg.data, "val_every_n_routes", 20))
         for town in towns:
             tdir = os.path.join(root, town)
             if not os.path.isdir(tdir):
                 continue
-            for route in sorted(os.listdir(tdir)):
+            routes = sorted(r for r in os.listdir(tdir)
+                            if os.path.isdir(os.path.join(tdir, r)))
+            for i, route in enumerate(routes):
+                if (split == "val") != (i % val_every == val_every - 1):
+                    continue
                 # labels/ is the authoritative frame list (see build_labels.py)
                 ldir = os.path.join(tdir, route, "labels")
                 if not os.path.isdir(ldir):
@@ -47,7 +61,7 @@ class CarlaDrivingDataset(Dataset):
                                             f[:-5]))
         if not synthetic_len and not self.frames:
             raise RuntimeError(
-                f"no labelled frames under {root} for towns {towns}. "
+                f"no labelled {split} frames under {root} for towns {towns}. "
                 "Did you run: python -m egca.data.build_labels --root <root> ?")
 
     def __len__(self):
