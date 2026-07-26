@@ -54,7 +54,9 @@
       "Bash(ssh -o BatchMode=yes razzaghi@213.233.184.253 'until [ $\\(grep -c \"routes; collecting\" ~/logs/sup_Town04.log\\) -ge 2 ] && [ $\\(grep -c \"routes; collecting\" ~/logs/sup_Town02.log\\) -ge 2 ] && [ $\\(grep -c \"routes; collecting\" ~/logs/sup_Town03.log\\) -ge 2 ]; do sleep 15; done; for t in 02 03 04; do echo \"Town$t: $\\(grep \"routes; collecting\" ~/logs/sup_Town$t.log | tail -1\\)\"; done')",
       "Bash(ssh -o BatchMode=yes razzaghi@213.233.184.253 'cd ~/thesis && git log --oneline -1 && echo \"--- next_index in the file on disk:\" && sed -n \"/^next_index/,/^}/p\" code/tools/collect_town.sh && echo \"--- direct test:\" && cd code && bash -c \"OUT=dataset/Town02; last=-1; for d in \\\\$OUT/route_*; do [ -d \\\\\"\\\\$d\\\\\" ] || continue; n=\\\\$\\(basename \\\\\"\\\\$d\\\\\" | sed -n \\\\\"s/^route_\\\\\\\\\\([0-9]\\\\\\\\{1,\\\\\\\\}\\\\\\\\\\)_.*/\\\\\\\\1/p\\\\\"\\); [ -z \\\\\"\\\\$n\\\\\" ] && continue; n=\\\\$\\(\\(10#\\\\$n\\)\\); [ \\\\\"\\\\$n\\\\\" -gt \\\\\"\\\\$last\\\\\" ] && last=\\\\$n; done; echo next=\\\\$\\(\\(last+1\\)\\)\"')",
       "Bash(bash -n code/tools/collect_town.sh)",
-      "Bash(git -c user.name=\"Navid Razaghi\" -c user.email=\"omidrazzaghi2000@gmail.com\" commit -q -m \"Actually apply the base-10 route index fix \\(previous edit silently failed to match\\)\")"
+      "Bash(git -c user.name=\"Navid Razaghi\" -c user.email=\"omidrazzaghi2000@gmail.com\" commit -q -m \"Actually apply the base-10 route index fix \\(previous edit silently failed to match\\)\")",
+      "Bash(ssh -o BatchMode=yes razzaghi@213.233.184.253 'echo \"=== write guard present on server?\"; grep -c \"already populated\" ~/thesis/code/egca/carla_sim/collect_data.py; echo \"=== guard triggered in the running collections?\"; grep -h \"already populated\" ~/logs/sup_Town0*.log | tail -5; echo \"\\(none above means no collision occurred yet\\)\"')",
+      "Bash(git -c user.name=\"Navid Razaghi\" -c user.email=\"omidrazzaghi2000@gmail.com\" commit -q -m \"Unbuffered collector output so supervisor logs are live\")"
     ]
   }
 }

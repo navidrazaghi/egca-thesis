@@ -80,7 +80,9 @@ while true; do
     start_server
 
     echo "$(date +%H:%M:%S) [$TOWN] $done_n/$TARGET routes; collecting $want from index $next"
-    PYTHONPATH=. python -m egca.carla_sim.collect_data \
+    # -u: unbuffered, otherwise the progress lines sit in the pipe buffer for
+    # minutes and the log looks dead while the run is perfectly healthy
+    PYTHONPATH=. python -u -m egca.carla_sim.collect_data \
         --town "$TOWN" --port "$PORT" --tm-port "$TMPORT" \
         --routes "$want" --first-route "$next" \
         --max-seconds 300 --scenario-every-m 100 \
