@@ -44,11 +44,22 @@ start_server() {
 }
 
 next_index() {
-    # highest existing route id + 1, so a resumed run never reuses a directory
-    local last
-    last=$(ls -d "$OUT"/route_* 2>/dev/null \
-           | sed 's/.*route_\([0-9]*\)_.*/\1/' | sort -n | tail -1)
-    echo $(( ${last:--1} + 1 ))
+    # Highest existing route id + 1.  Two traps here, both of which produced a
+    # resumed run that pointed at an already-occupied directory:
+    #   * bash arithmetic reads a leading zero as octal, so $((013 + 1)) is 12,
+    #     not 14 -- hence the explicit 10# base prefix;
+    #   * a digit in the parent path would be picked up by a greedy match, so
+    #     the id is extracted from the basename only.
+    local last=-1 n
+    for d in "$OUT"/route_*; do
+        [ -d "$d" ] || continue
+        n=$(basename "$d" | sed -n 's/^route_\([0-9]\{1,\}\)_.*/\1/p')
+        if [ -n "$n" ]; then
+            n=$((10#$n))
+            [ "$n" -gt "$last" ] && last=$n
+        fi
+    done
+    echo $(( last + 1 ))
 }
 
 route_count() {
