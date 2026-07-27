@@ -121,8 +121,14 @@ def main():
                                     device, cfg, train=False)
         for k, v in va_stats.items():
             writer.add_scalar(f"val/{k}", v, epoch)
-        print(f"epoch {epoch:03d}  train {tr_stats['total']:.4f}  "
-              f"val {va_stats['total']:.4f}  ({time.time() - t0:.0f}s)")
+        # The weighted totals of train and val are not comparable (the auxiliary
+        # heads only run in training mode), so the raw waypoint L1 -- in metres,
+        # the only interpretable convergence number -- is printed alongside.
+        print(f"epoch {epoch:03d}  train {tr_stats['total']:.4f} "
+              f"(wp {tr_stats['wp']:.3f} m)  val {va_stats['total']:.4f} "
+              f"(wp {va_stats['wp']:.3f} m)  lr {optimizer.param_groups[0]['lr']:.2e}"
+              f"  ({time.time() - t0:.0f}s)")
+        writer.add_scalar("val/wp_metres", va_stats["wp"], epoch)
         ckpt = {"model": model.state_dict(), "criterion": criterion.state_dict(),
                 "cfg": dict(cfg), "epoch": epoch}
         torch.save(ckpt, os.path.join(cfg.train.ckpt_dir, "last.pth"))
