@@ -35,28 +35,47 @@ def pillarize(points, cfg):
     ix = ((pts[:, 0] - x0) / ps).long().clamp(0, nx - 1)
     iy = ((pts[:, 1] - y0) / ps).long().clamp(0, ny - 1)
     flat = ix * ny + iy
-    uniq, inv = torch.unique(flat, return_inverse=True)
-    P = min(len(uniq), cfg.max_pillars)
+    uniq, inv, counts = torch.unique(flat, return_inverse=True,
+                                     return_counts=True)
     M = cfg.max_points_per_pillar
+    n_pillars = int(uniq.numel())
+
+    # Cap the number of pillars by dropping whole pillars at random, so the
+    # survivors keep all of their points.
+    if n_pillars > cfg.max_pillars:
+        keep_p = torch.randperm(n_pillars)[: cfg.max_pillars]
+        remap = torch.full((n_pillars,), -1, dtype=torch.long)
+        remap[keep_p] = torch.arange(cfg.max_pillars)
+        pt_keep = remap[inv] >= 0
+        pts, ix, iy = pts[pt_keep], ix[pt_keep], iy[pt_keep]
+        inv = remap[inv[pt_keep]]
+        uniq = uniq[keep_p]
+        counts = torch.bincount(inv, minlength=cfg.max_pillars)
+    P = int(uniq.numel())
+
+    # Rank of each point inside its pillar, computed without a Python loop.
+    # Sorting by pillar id groups the points; subtracting the start offset of
+    # each group turns the global position into a within-pillar index.  The
+    # original loop over every point cost 575 ms per sample, which starved the
+    # GPU (0% utilisation) and would have made one training run take ~45 h.
+    order = torch.argsort(inv, stable=True)
+    inv_sorted = inv[order]
+    offset = torch.cumsum(counts, 0) - counts
+    rank = torch.arange(inv_sorted.numel()) - offset[inv_sorted]
+    keep = rank < M
+    idx, pil, r = order[keep], inv_sorted[keep], rank[keep]
 
     feats = torch.zeros(P, M, 9)
     mask = torch.zeros(P, M)
-    coords = torch.zeros(P, 2, dtype=torch.long)
-    counts = torch.zeros(len(uniq), dtype=torch.long)
-    order = torch.randperm(len(pts))            # random point subsampling
-    for i in order.tolist():
-        p = inv[i].item()
-        if p >= P or counts[p] >= M:
-            continue
-        j = counts[p].item()
-        xc = x0 + (ix[i].float() + 0.5) * ps
-        yc = y0 + (iy[i].float() + 0.5) * ps
-        feats[p, j, :4] = pts[i]
-        feats[p, j, 7] = pts[i, 0] - xc          # offset to pillar center
-        feats[p, j, 8] = pts[i, 1] - yc
-        mask[p, j] = 1.0
-        coords[p, 0], coords[p, 1] = ix[i], iy[i]
-        counts[p] += 1
+    sel = pts[idx]
+    feats[pil, r, :4] = sel
+    mask[pil, r] = 1.0
+    xc = x0 + (ix[idx].float() + 0.5) * ps
+    yc = y0 + (iy[idx].float() + 0.5) * ps
+    feats[pil, r, 7] = sel[:, 0] - xc            # offset to pillar center
+    feats[pil, r, 8] = sel[:, 1] - yc
+    # pillar coordinates recovered from the flat index
+    coords = torch.stack([uniq // ny, uniq % ny], dim=1)
     # offsets to pillar mean (Eq. 3.8, terms x - x_bar etc.)
     mean = (feats[..., :3] * mask.unsqueeze(-1)).sum(1, keepdim=True) \
         / mask.sum(1, keepdim=True).clamp(min=1).unsqueeze(-1)
