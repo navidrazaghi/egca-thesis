@@ -1,6 +1,6 @@
 {
   "config": "configs/egca.yaml",
-  "checkpoint": "checkpoints/egca/best.pth",
+  "checkpoint": "checkpoints/egca_s0/best.pth",
   "drop_sensor": null,
   "lidar_drop_rate": 0.0,
   "seed": 0,
