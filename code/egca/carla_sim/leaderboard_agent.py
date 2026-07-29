@@ -52,7 +52,7 @@ except ImportError:                                   # pragma: no cover
 # Absolute imports on purpose: the leaderboard loads this file as a standalone
 # module from its path, so it has no parent package and relative imports fail.
 # `<repo>/code` must therefore be on PYTHONPATH (see eval_env.sh).
-from egca.config import load_config
+from egca.config import Cfg, load_config
 from egca.control.pid import WaypointController
 from egca.models import EGCAPolicy
 from egca.models.lidar_encoder import pillarize
@@ -86,10 +86,18 @@ class EGCAAgent(AutonomousAgent):
         def _rel(p):
             return p if os.path.isabs(p) else os.path.join(base, "..", p)
 
-        self.cfg = load_config(_rel(conf["config"]), [])
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = EGCAPolicy(self.cfg, sensor_dropout=0.0).to(self.device).eval()
         ckpt = torch.load(_rel(conf["checkpoint"]), map_location=self.device)
+        # The architecture comes from the checkpoint, not from the yaml.  Every
+        # ablation was trained by overriding the same base config -- full
+        # attention, no gate, concat fusion, no auxiliary heads -- so rebuilding
+        # from the yaml gives a model whose shapes do not match the weights, and
+        # the evaluator dutifully scores 36 failed routes.  train.py stores the
+        # config it actually trained with, which cannot drift from the weights.
+        self.cfg = (Cfg(ckpt["cfg"]) if "cfg" in ckpt
+                    else load_config(_rel(conf["config"]),
+                                     conf.get("overrides") or []))
+        self.model = EGCAPolicy(self.cfg, sensor_dropout=0.0).to(self.device).eval()
         self.model.load_state_dict(ckpt["model"])
         self.ctrl = WaypointController(self.cfg.control,
                                        self.cfg.model.decoder.wp_dt)

@@ -43,6 +43,7 @@ CKPT_DIR=${4:?checkpoint dir}
 : "${LIDAR_DROP_RATE:=0.0}"
 : "${DEBUG_DIR:=}"
 : "${MAX_ATTEMPTS:=12}"
+: "${SERVER_TIMEOUT:=600}"
 
 : "${LEADERBOARD_ROOT:?source tools/eval_env.sh first}"
 : "${ROUTES6:?source tools/eval_env.sh first}"
@@ -93,6 +94,30 @@ print(p[0], p[1])
 PY
 }
 
+# Wait until the simulator actually answers, rather than for a fixed interval.
+# Several simulators compiling shaders on the same GPU take far longer to come
+# up than one does, and a fixed sleep that is generous for one slot is not
+# enough for four: the evaluator then dies on its own 60 s connect timeout and
+# the whole attempt is wasted booting a server that was nearly ready.
+wait_for_server() {
+    local deadline=$(( SECONDS + SERVER_TIMEOUT ))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if python - "$PORT" 2>/dev/null <<'PY'
+import sys, carla
+c = carla.Client("localhost", int(sys.argv[1]))
+c.set_timeout(10.0)
+c.get_server_version()
+PY
+        then
+            echo "$(date +%H:%M:%S) [$TAG] simulator ready on $PORT"
+            return 0
+        fi
+        sleep 10
+    done
+    echo "$(date +%H:%M:%S) [$TAG] simulator did not come up within ${SERVER_TIMEOUT}s"
+    return 1
+}
+
 start_server() {
     docker rm -f "$CONTAINER" >/dev/null 2>&1
     docker run -d --name "$CONTAINER" --gpus all --net=host \
@@ -102,7 +127,7 @@ start_server() {
         -RenderOffScreen -nosound -quality-level=Epic \
         -carla-rpc-port="$PORT" >/dev/null
     echo "$(date +%H:%M:%S) [$TAG] started $CONTAINER, waiting for shaders"
-    sleep 180
+    wait_for_server
 }
 
 for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
@@ -114,7 +139,9 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
     RESUME=0
     [ -f "$OUT" ] && RESUME=1
 
-    start_server
+    if ! start_server; then
+        continue                     # count it as an attempt and try again
+    fi
     echo "$(date +%F\ %T) [$TAG] attempt $attempt, resume=$RESUME, at $done_n routes"
 
     # -u so the log is live rather than sitting in the pipe buffer

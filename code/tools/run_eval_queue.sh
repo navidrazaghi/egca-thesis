@@ -85,6 +85,9 @@ worker() {
     local port=$(( BASE_PORT + slot * 10 ))
     local tmport=$(( BASE_TMPORT + slot * 10 ))
     local i=0
+    # Stagger the starts: four simulators compiling shaders at the same instant
+    # on one GPU is the slowest possible way to bring them up.
+    sleep $(( slot * 45 ))
     for job in "${SELECTED[@]}"; do
         if [ $(( i % SLOTS )) -eq "$slot" ]; then
             IFS='|' read -r name seed weather ckpt envs <<<"$job"
