@@ -49,15 +49,19 @@ try:
 except ImportError:                                   # pragma: no cover
     AutonomousAgent, Track = object, None
 
-from ..config import load_config
-from ..control.pid import WaypointController
-from ..models import EGCAPolicy
-from ..models.lidar_encoder import pillarize
-from .sensors import CAM_FOV, CAM_H, CAM_W, stitch_cameras
+# Absolute imports on purpose: the leaderboard loads this file as a standalone
+# module from its path, so it has no parent package and relative imports fail.
+# `<repo>/code` must therefore be on PYTHONPATH (see eval_env.sh).
+from egca.config import load_config
+from egca.control.pid import WaypointController
+from egca.models import EGCAPolicy
+from egca.models.lidar_encoder import pillarize
+from egca.carla_sim.sensors import CAM_FOV, CAM_H, CAM_W, stitch_cameras
 
 EARTH_RADIUS = 6378137.0
 GOAL_DISTANCE = 8.0        # must match PrivilegedExpert.GOAL_DISTANCE
 COMMAND_HORIZON = 15.0
+PLAN_RESOLUTION = 1.0      # must match PrivilegedExpert.PLAN_RESOLUTION
 
 # RoadOption -> the command indices the network was trained with
 COMMAND_MAP = {"LEFT": 0, "RIGHT": 1, "STRAIGHT": 2, "LANEFOLLOW": 3,
@@ -135,19 +139,51 @@ class EGCAAgent(AutonomousAgent):
         An equirectangular projection around the first plan point is accurate to
         well under a centimetre over the few kilometres of a leaderboard route,
         and avoids depending on the evaluator's internal GPS calibration.
+
+        The plan is then resampled to PLAN_RESOLUTION.  This is not cosmetic:
+        the leaderboard hands the agent a *downsampled* route whose vertices are
+        tens of metres apart, while the expert that generated the training data
+        walked a 1 m plan straight out of the GlobalRoutePlanner.  Every
+        arc-length computation below -- the goal look-ahead above all -- would
+        otherwise snap to the next distant vertex and feed the network a goal
+        far outside the range it was trained on.
         """
         plan = self._global_plan            # [({lat, lon, z}, RoadOption)]
         lat0 = plan[0][0]["lat"]
         lon0 = plan[0][0]["lon"]
         self.origin = (lat0, lon0)
-        self.plan_xy = []
+        sparse = []
         for gnss, opt in plan:
             x, y = self._latlon_to_xy(gnss["lat"], gnss["lon"])
-            self.plan_xy.append((x, y, COMMAND_MAP.get(str(opt).split(".")[-1], 3)))
+            sparse.append((x, y, COMMAND_MAP.get(str(opt).split(".")[-1], 3)))
+        self.plan_xy = self._densify(sparse)
         self.plan_cum = [0.0]
         for i in range(len(self.plan_xy) - 1):
             self.plan_cum.append(self.plan_cum[-1] + math.dist(
                 self.plan_xy[i][:2], self.plan_xy[i + 1][:2]))
+
+    @staticmethod
+    def _densify(sparse, step=PLAN_RESOLUTION):
+        """Resample a polyline to `step` spacing, keeping every original vertex.
+
+        Interpolated points inherit the command of the segment they start from,
+        which is where the evaluator announces it.  The chord between two
+        vertices cuts the corner of a curved lane slightly; over the 8 m
+        look-ahead used here that error is far below the metre-scale accuracy
+        the goal input needs, and it is what keeps the junction commands aligned
+        with the vertices that carry them.
+        """
+        if len(sparse) < 2:
+            return list(sparse)
+        out = []
+        for (x0, y0, cmd), (x1, y1, _) in zip(sparse, sparse[1:]):
+            seg = math.dist((x0, y0), (x1, y1))
+            n = max(1, int(seg / step))
+            for k in range(n):                       # excludes the end vertex,
+                t = k / n                            # which the next segment adds
+                out.append((x0 + t * (x1 - x0), y0 + t * (y1 - y0), cmd))
+        out.append(sparse[-1])
+        return out
 
     def _latlon_to_xy(self, lat, lon):
         lat0, lon0 = self.origin
@@ -179,23 +215,39 @@ class EGCAAgent(AutonomousAgent):
                     best, best_d = i, d
         self.idx = best
 
+    def _point_at(self, distance, ego_xy, compass, min_forward=0.5):
+        """Ego-frame point `distance` metres ahead along the plan.
+
+        Mirrors PrivilegedExpert._point_at, including the guarantee that the
+        returned point lies in front of the vehicle: a target behind the car
+        saturates the steering command instead of steering towards the route,
+        and the training data was generated with that guarantee in force.
+        """
+        acc, i = 0.0, self.idx
+        while i + 1 < len(self.plan_xy) and acc < distance:
+            acc += math.dist(self.plan_xy[i][:2], self.plan_xy[i + 1][:2])
+            i += 1
+        for _ in range(200):
+            x, y = self._to_ego(self.plan_xy[i][0], self.plan_xy[i][1],
+                                ego_xy, compass)
+            if x > min_forward or i + 1 >= len(self.plan_xy):
+                return x, y
+            i += 1
+        return self._to_ego(self.plan_xy[i][0], self.plan_xy[i][1],
+                            ego_xy, compass)
+
     def _goal_and_command(self, ego_xy, compass, speed):
+        """Mirrors PrivilegedExpert.sparse_goal / .nav_command: same look-ahead,
+        same speed-scaled announcement window, same fallback."""
+        goal = self._point_at(GOAL_DISTANCE, ego_xy, compass)
+        horizon = max(8.0, 2.0 * speed)
         i = self.idx
         while (i + 1 < len(self.plan_xy)
-               and self.plan_cum[i] - self.plan_cum[self.idx] < GOAL_DISTANCE):
+               and self.plan_cum[i] - self.plan_cum[self.idx] < horizon):
+            if self.plan_xy[i][2] != 3:          # a turn is coming up
+                return goal, self.plan_xy[i][2]
             i += 1
-        gx, gy = self._to_ego(self.plan_xy[i][0], self.plan_xy[i][1],
-                              ego_xy, compass)
-        horizon = max(8.0, 2.0 * speed)
-        j = self.idx
-        cmd = self.plan_xy[min(j, len(self.plan_xy) - 1)][2]
-        while (j + 1 < len(self.plan_xy)
-               and self.plan_cum[j] - self.plan_cum[self.idx] < horizon):
-            if self.plan_xy[j][2] != 3:
-                cmd = self.plan_xy[j][2]
-                break
-            j += 1
-        return (gx, gy), cmd
+        return goal, self.plan_xy[min(i, len(self.plan_xy) - 1)][2]
 
     # ------------------------------------------------------------------- step
     def run_step(self, input_data, timestamp):
