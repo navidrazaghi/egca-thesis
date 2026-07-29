@@ -86,6 +86,9 @@ class EGCAAgent(AutonomousAgent):
         def _rel(p):
             return p if os.path.isabs(p) else os.path.join(base, "..", p)
 
+        # Belt and braces with the OMP_* caps in eval_env.sh: torch reads those
+        # only at import time, and the evaluator imports it before the agent.
+        torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", 4)))
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         ckpt = torch.load(_rel(conf["checkpoint"]), map_location=self.device)
         # The architecture comes from the checkpoint, not from the yaml.  Every

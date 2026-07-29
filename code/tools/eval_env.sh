@@ -26,8 +26,20 @@ export ROUTES6=$LEADERBOARD_ROOT/data/longest6
 # its path, so it has no parent package and must import `egca.*` absolutely --
 # hence $EGCA_ROOT on the path.  $CARLA_ROOT/carla/agents is needed because the
 # route planner is imported as `agents.navigation.*`.
-export PYTHONPATH=$CARLA_ROOT/carla:$CARLA_ROOT/carla/agents:$LEADERBOARD_ROOT:$SCENARIO_RUNNER_ROOT:$EGCA_ROOT:$PYTHONPATH
+export PYTHONPATH=$CARLA_ROOT/carla:$CARLA_ROOT/carla/agents:$LEADERBOARD_ROOT:$SCENARIO_RUNNER_ROOT:$EGCA_ROOT:${PYTHONPATH:-}
 
 export CHALLENGE_TRACK_CODENAME=SENSORS
 export REPETITIONS=1
 export DEBUG_CHALLENGE=0
+
+# Cap the CPU thread pools.  Torch sizes its intra-op pool from the core count,
+# so an unconfigured agent opens ~130 threads; four of them next to four
+# simulators put 500+ threads on 32 cores and the load average sat near 60 while
+# the GPU idled at 0-15%.  The policy runs on the GPU -- these threads are for
+# pillarisation and image normalisation -- so a small pool per slot is enough,
+# and leaving cores for CarlaUE4 is what actually determines throughput.
+: "${THREADS_PER_SLOT:=4}"
+export OMP_NUM_THREADS=$THREADS_PER_SLOT
+export MKL_NUM_THREADS=$THREADS_PER_SLOT
+export OPENBLAS_NUM_THREADS=$THREADS_PER_SLOT
+export NUMEXPR_NUM_THREADS=$THREADS_PER_SLOT
