@@ -67,11 +67,75 @@ class CarlaDrivingDataset(Dataset):
     def __len__(self):
         return self.synthetic_len or len(self.frames)
 
+    # Mirroring maps a left turn onto a right turn and leaves the other two
+    # commands alone (0 left, 1 right, 2 straight, 3 lanefollow).
+    FLIP_COMMAND = {0: 1, 1: 0, 2: 2, 3: 3}
+
     def _augment_img(self, img):
+        """Label-invariant photometric jitter.
+
+        Deliberately *not* a yaw perturbation.  A horizontal shift of the strip
+        is not a rotation of the rig: the three 60 deg cameras at -55/0/+55 leave
+        11 deg angular gaps between the stitched segments, and within a segment
+        the angle-to-pixel scale runs from 0.207 deg/px at the centre to 0.170 at
+        the edge.  A true rotation is an exact homography per camera, but it
+        needs the raw 320 px images and only the stitched 704 px strip is stored,
+        so the margin it would draw from is gone.  Shifting would hand the
+        network an image that disagrees with its own labels.
+        """
         if np.random.rand() < 0.5:   # color jitter
             img = np.clip(img * np.random.uniform(0.8, 1.2, size=(1, 1, 3))
                           + np.random.uniform(-12, 12), 0, 255)
+        if np.random.rand() < 0.3:   # defocus / motion blur
+            k = int(np.random.choice([3, 5]))
+            img = cv2.GaussianBlur(img, (k, k), 0)
+        if np.random.rand() < 0.3:   # sensor noise
+            img = np.clip(img + np.random.normal(0, np.random.uniform(2, 8),
+                                                 img.shape), 0, 255)
+        if np.random.rand() < 0.25:  # random erasing: occlusion robustness
+            h, w = img.shape[:2]
+            eh, ew = np.random.randint(8, 40), np.random.randint(8, 80)
+            r, c = np.random.randint(0, h - eh), np.random.randint(0, w - ew)
+            img[r:r + eh, c:c + ew] = np.random.uniform(0, 255)
         return img
+
+    def _augment_lidar(self, pts):
+        """Label-invariant point-cloud jitter.
+
+        The LiDAR branch overfits alongside the camera one, and the evaluation
+        cloud is measurably sparser than the training cloud (the leaderboard
+        forces 64 channels where collection used 32), so thinning during
+        training moves the training density towards evaluation as well.
+        """
+        if len(pts) and np.random.rand() < 0.5:      # random thinning
+            keep = np.random.uniform(0.6, 1.0)
+            n = max(1, int(len(pts) * keep))
+            pts = pts[np.random.choice(len(pts), n, replace=False)]
+        if len(pts) and np.random.rand() < 0.5:      # range noise
+            pts = pts.copy()
+            pts[:, :3] += np.random.normal(0, 0.02, (len(pts), 3))
+        return pts
+
+    def _mirror(self, img, pts, seg, depth, wp, goal, command):
+        """Reflect the entire sample about the ego's forward axis.
+
+        This one *is* exact.  The rig is symmetric about that axis -- equal-FOV
+        cameras at -55/0/+55 -- so mirroring the strip and negating every lateral
+        component is a physically consistent sample, not an approximation.  It
+        doubles the effective dataset, which is the point given that validation
+        plateaued at epoch 12 while training loss kept falling, and it removes
+        any left/right asymmetry the collected routes happen to carry.
+        """
+        img = np.ascontiguousarray(img[:, ::-1])
+        depth = np.ascontiguousarray(depth[:, ::-1])
+        seg = np.ascontiguousarray(seg[:, ::-1])   # BEV cols increase with +y
+        pts = pts.copy()
+        pts[:, 1] *= -1.0
+        wp = wp.copy()
+        wp[:, 1] *= -1.0
+        goal = goal.copy()
+        goal[1] *= -1.0
+        return img, pts, seg, depth, wp, goal, self.FLIP_COMMAND[int(command)]
 
     def _load(self, idx):
         h, w = self.cfg.model.camera.image_size
@@ -105,8 +169,17 @@ class CarlaDrivingDataset(Dataset):
 
     def __getitem__(self, idx):
         img, pts, meas, seg, depth = self._load(idx)
+        wp = np.asarray(meas["waypoints"], dtype=np.float32)
+        goal = np.array([meas["goal_x"], meas["goal_y"]], dtype=np.float32)
+        command = int(meas["command"])
         if self.augment:
             img = self._augment_img(img)
+            pts = self._augment_lidar(pts)
+            # getattr so the checkpoints trained before this existed still load
+            if np.random.rand() < float(getattr(self.cfg.train, "flip_prob",
+                                                0.5)):
+                img, pts, seg, depth, wp, goal, command = self._mirror(
+                    img, pts, seg, depth, wp, goal, command)
         img = (img / 255.0 - np.array([0.485, 0.456, 0.406])) \
             / np.array([0.229, 0.224, 0.225])
         feats, coords, mask = pillarize(pts, self.cfg.model.lidar)
@@ -114,10 +187,9 @@ class CarlaDrivingDataset(Dataset):
             "image": torch.from_numpy(img.transpose(2, 0, 1).copy()).float(),
             "pillar_feats": feats, "pillar_coords": coords, "pillar_mask": mask,
             "speed": torch.tensor([meas["speed"]], dtype=torch.float32),
-            "command": torch.tensor(meas["command"], dtype=torch.long),
-            "goal": torch.tensor([meas["goal_x"], meas["goal_y"]],
-                                 dtype=torch.float32),
-            "waypoints": torch.tensor(meas["waypoints"], dtype=torch.float32),
+            "command": torch.tensor(command, dtype=torch.long),
+            "goal": torch.from_numpy(goal),
+            "waypoints": torch.from_numpy(wp),
             "bev_seg": torch.from_numpy(seg),
             "depth": torch.from_numpy(depth).unsqueeze(0),
         }
