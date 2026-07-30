@@ -99,8 +99,10 @@ def main():
                        num_workers=0 if args.synthetic else cfg.train.num_workers)
 
     model = EGCAPolicy(cfg, sensor_dropout=cfg.train.sensor_dropout).to(device)
-    criterion = UncertaintyWeightedLoss(cfg.model.aux.bev_seg,
-                                        cfg.model.aux.depth).to(device)
+    criterion = UncertaintyWeightedLoss(
+        cfg.model.aux.bev_seg, cfg.model.aux.depth,
+        wp_dt=cfg.model.decoder.wp_dt,
+        speed_bins=getattr(cfg.model.decoder, "speed_bins", None)).to(device)
     params = list(model.parameters()) + list(criterion.parameters())
     optimizer = torch.optim.Adam(params, lr=cfg.train.lr,
                                  weight_decay=cfg.train.weight_decay)

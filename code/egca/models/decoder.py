@@ -8,13 +8,20 @@ import torch.nn as nn
 
 
 class WaypointDecoder(nn.Module):
-    def __init__(self, ctx_dim=256, hidden_dim=256, horizon=4):
+    def __init__(self, ctx_dim=256, hidden_dim=256, horizon=4, use_goal=True):
         super().__init__()
         self.horizon = horizon
+        # Whether the goal is still fed at every recurrent step.  With the goal
+        # available to the fusion as a token, keeping it here as well leaves the
+        # shortcut intact: the recurrent input is four numbers, two of which
+        # point straight at the target, so the goal outweighs everything the
+        # encoder learned.
+        self.use_goal = use_goal
         self.init_mlp = nn.Sequential(                 # Eq. (4.10)
             nn.Linear(ctx_dim * 2, hidden_dim), nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, hidden_dim))
-        self.gru = nn.GRUCell(input_size=4, hidden_size=hidden_dim)
+        self.gru = nn.GRUCell(input_size=4 if use_goal else 2,
+                              hidden_size=hidden_dim)
         self.out = nn.Sequential(
             nn.Linear(hidden_dim, 64), nn.ReLU(inplace=True), nn.Linear(64, 2))
 
@@ -26,7 +33,8 @@ class WaypointDecoder(nn.Module):
         wp = z.new_zeros(b, 2)
         out = []
         for _ in range(self.horizon):
-            h = self.gru(torch.cat([wp, goal], dim=-1), h)   # Eq. (4.11)
+            step_in = torch.cat([wp, goal], dim=-1) if self.use_goal else wp
+            h = self.gru(step_in, h)                         # Eq. (4.11)
             wp = wp + self.out(h)                            # Eq. (4.12)
             out.append(wp)
         return torch.stack(out, dim=1)

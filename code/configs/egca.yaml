@@ -16,6 +16,15 @@ model:
   fusion:
     # egca | concat | late | camera_only | lidar_only   (Tables 5-4, 5-5)
     mode: egca
+    # image | bev.  "bev" projects the camera features into the LiDAR's metric
+    # grid before fusion so the two branches share one frame; "image" keeps the
+    # original arrangement where the correspondence has to be learned.
+    camera_space: image
+    depth_bins: 32
+    # decoder | both | fusion.  Where the navigation goal enters the policy.
+    # "decoder" is the original: the goal is fed to the GRU at every step and
+    # nowhere else, which is the late-conditioning bottleneck LEAD reports.
+    goal_injection: decoder
     num_blocks: 4                 # L
     num_heads: 4                  # H
     ffn_dim: 512
@@ -26,6 +35,12 @@ model:
     hidden_dim: 256
     horizon: 4                    # T waypoints
     wp_dt: 0.5                    # seconds between waypoints
+    # pooled | query.  "pooled" is the original mean-pool into a GRU; "query"
+    # lets learned planning queries read the fused tokens directly and adds a
+    # target-speed head, removing the spatial bottleneck before the trajectory.
+    readout: pooled
+    query_layers: 3
+    speed_bins: [0.0, 2.0, 4.0, 6.0, 8.0]
   aux:
     bev_seg: true                 # ablation switch
     bev_classes: 6                # road, lane-marking, vehicle, pedestrian, obstacle, free
@@ -38,6 +53,10 @@ train:
   weight_decay: 1.0e-4
   warmup_epochs: 2
   sensor_dropout: 0.15            # rho (ablation switch: 0.0)
+  # Mirror the whole sample about the ego's forward axis.  Exact for this rig
+  # (equal-FOV cameras at -55/0/+55), so it doubles the effective dataset rather
+  # than approximating it; see dataset._mirror.  Set 0.0 to disable.
+  flip_prob: 0.5
   amp: true
   num_workers: 8
   log_every: 50
@@ -49,6 +68,13 @@ control:
   max_throttle: 0.75
   brake_speed_ratio: 1.05         # brake if v > ratio * v_des
   clip_delta: 0.25
+  # Creeping, to break the standstill the policy cannot leave on its own.
+  # The threshold is deliberately longer than a red light so that waiting
+  # legally is never interrupted.
+  control_hz: 20.0
+  creep_after_s: 55.0
+  creep_for_s: 1.5
+  creep_speed: 4.0
 
 data:
   root: dataset/
