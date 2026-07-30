@@ -40,13 +40,56 @@ class WaypointController:
         self.brake_ratio = ctrl_cfg.brake_speed_ratio
         self.clip_delta = ctrl_cfg.clip_delta
         self.wp_dt = wp_dt
+        # Creeping (TransFuser Sec. 3.5).  Standing still is overwhelmingly the
+        # most common thing to do next in a demonstration set collected in dense
+        # traffic, so a cloned policy that stops can fail to ever start again --
+        # the inertia problem.  Our own traces show the same shape: throttle
+        # pinned at 0.75, brake at zero, speed decaying to nothing while the car
+        # leans on an obstacle until the blocked timeout ends the route.
+        hz = float(getattr(ctrl_cfg, "control_hz", 20.0))
+        self.creep_after = int(float(getattr(ctrl_cfg, "creep_after_s", 55.0)) * hz)
+        self.creep_for = int(float(getattr(ctrl_cfg, "creep_for_s", 1.5)) * hz)
+        self.creep_speed = float(getattr(ctrl_cfg, "creep_speed", 4.0))
+        self.stuck_steps = 0
+        self.creep_steps = 0
 
     def reset(self):
         self.turn.reset()
         self.speed.reset()
+        self.stuck_steps = 0
+        self.creep_steps = 0
 
-    def step(self, waypoints, speed):
-        """waypoints: T x 2 (x fwd, y left) in ego frame; speed in m/s."""
+    def _creeping(self, speed, hazard):
+        """Decide whether to force the car forward this step.
+
+        The hazard flag comes from the caller because it is a sensor question,
+        not a control one.  Creeping without it is unsafe: the reason the car is
+        stationary is often that something is directly in front of it.
+        """
+        if speed < 0.1:
+            self.stuck_steps += 1
+        elif self.creep_steps == 0:
+            self.stuck_steps = 0
+        if self.stuck_steps <= self.creep_after:
+            return False
+        if hazard:                      # blocked for a real reason; keep waiting
+            self.creep_steps = 0
+            return False
+        self.creep_steps += 1
+        if self.creep_steps >= self.creep_for:
+            self.stuck_steps = 0        # one nudge, then re-arm
+            self.creep_steps = 0
+        return True
+
+    def step(self, waypoints, speed, hazard=False, v_des=None):
+        """waypoints: T x 2 (x fwd, y left) in ego frame; speed in m/s.
+
+        `v_des` overrides the speed implied by the waypoint spacing.  With the
+        query readout the network predicts it from the scene, which breaks the
+        loop that made a standstill self-sustaining: previously a collapsed
+        trajectory meant zero desired speed, zero speed meant a stationary input,
+        and a stationary input reproduced the collapsed trajectory.
+        """
         wp = np.asarray(waypoints, dtype=np.float64)
         # -- lateral: heading error toward the aim point (Eq. 4.13).  The error
         # is negated because a target on the left (y > 0) requires a negative
@@ -55,9 +98,19 @@ class WaypointController:
         aim = (wp[0] + wp[1]) / 2.0
         angle = -np.degrees(np.arctan2(aim[1], aim[0])) / 90.0
         steer = float(np.clip(self.turn.step(angle), -1.0, 1.0))
-        # -- longitudinal: desired speed from waypoint spacing (Eq. 4.14)
-        v_des = float(np.linalg.norm(wp[1] - wp[0]) / self.wp_dt)
-        brake = speed > v_des * self.brake_ratio or v_des < 0.4
+        # -- longitudinal: desired speed from waypoint spacing (Eq. 4.14),
+        # unless the network predicted it directly
+        if v_des is None:
+            v_des = float(np.linalg.norm(wp[1] - wp[0]) / self.wp_dt)
+        else:
+            v_des = float(v_des)
+        if self._creeping(speed, hazard):
+            # Override the network: it is predicting a standstill and has no way
+            # out of it, because a standstill is what it was shown.
+            v_des = self.creep_speed
+            brake = False
+        else:
+            brake = speed > v_des * self.brake_ratio or v_des < 0.4
         delta = np.clip(v_des - speed, 0.0, self.clip_delta)
         throttle = float(np.clip(self.speed.step(delta), 0.0, self.max_throttle))
         if brake:

@@ -102,7 +102,16 @@ class EGCAAgent(AutonomousAgent):
                                      conf.get("overrides") or []))
         self.model = EGCAPolicy(self.cfg, sensor_dropout=0.0).to(self.device).eval()
         self.model.load_state_dict(ckpt["model"])
-        self.ctrl = WaypointController(self.cfg.control,
+        # Controller settings come from the checkpoint like everything else, but
+        # unlike the architecture they are not fixed by the weights: creeping and
+        # the PID gains can be changed without retraining, and the whole point of
+        # measuring creeping is to run the same checkpoint with and without it.
+        # Note the assignment goes through the underlying dict -- Cfg.__getattr__
+        # returns a fresh wrapper on every access, so updating `self.cfg.control`
+        # would write to a temporary and vanish.
+        ctrl_cfg = dict(self.cfg["control"])
+        ctrl_cfg.update(conf.get("control") or {})
+        self.ctrl = WaypointController(Cfg(ctrl_cfg),
                                        self.cfg.model.decoder.wp_dt)
         # perturbation settings for the robustness experiments
         self.drop_sensor = conf.get("drop_sensor")
@@ -284,9 +293,17 @@ class EGCAAgent(AutonomousAgent):
         with torch.no_grad():
             out = self.model(batch, force_drop=force)
         wps = out["waypoints"][0].cpu().numpy()
-        steer, throttle, brake = self.ctrl.step(wps, speed)
-        if self.debug_dir and self.step_i % 20 == 0:
-            self._dump_debug(strip, wps, speed, command, goal, out)
+        v_des = None
+        if "speed_logits" in out:
+            v_des = float(self.model.query_readout.expected_speed(
+                out["speed_logits"])[0])
+        steer, throttle, brake = self.ctrl.step(
+            wps, speed, hazard=self._hazard_ahead(lidar), v_des=v_des)
+        if self.debug_dir:
+            self._trace(batch, wps, speed, command, goal, out,
+                        steer, throttle, brake)
+            if self.step_i % 20 == 0:
+                self._dump_debug(strip, wps, speed, command, goal, out)
         self.step_i += 1
         return carla.VehicleControl(steer=float(steer), throttle=float(throttle),
                                     brake=float(brake))
@@ -320,6 +337,62 @@ class EGCAAgent(AutonomousAgent):
             "goal": torch.tensor([list(goal)], dtype=torch.float32),
         }
         return {k: v.to(self.device) for k, v in batch.items()}
+
+    # Box swept by the car during one creep nudge, plus a margin: 4 m/s for
+    # 1.5 s is 6 m, and the ego is about 2 m wide.
+    HAZARD_BOX = (1.0, 7.0, -1.2, 1.2, -1.8, 1.0)   # x0, x1, y0, y1, z0, z1
+
+    def _hazard_ahead(self, lidar, min_points=8):
+        """Is something solid directly in front of the car?
+
+        Creeping exists to break a self-sustaining standstill, but the car is
+        often stationary precisely because an obstacle is there, and nudging
+        into it would turn a blocked route into a collision.  A handful of
+        returns inside the swept box is enough to hold position; a single stray
+        point is not, hence the count threshold.
+        """
+        if lidar is None or len(lidar) == 0:
+            return False
+        x0, x1, y0, y1, z0, z1 = self.HAZARD_BOX
+        m = ((lidar[:, 0] > x0) & (lidar[:, 0] < x1)
+             & (lidar[:, 1] > y0) & (lidar[:, 1] < y1)
+             & (lidar[:, 2] > z0) & (lidar[:, 2] < z1))
+        return bool(m.sum() >= min_points)
+
+    def _trace(self, batch, wps, speed, command, goal, out, steer, throttle,
+               brake):
+        """One JSONL record per frame, holding every quantity the network is fed.
+
+        Two of the three defects found so far were train/eval input mismatches
+        that open-loop validation cannot see -- the look-ahead goal was 3-6x
+        beyond its training range while the waypoint error stayed at 0.137 m.
+        The fix for that class of bug is to compare the distribution of what the
+        agent actually builds against the dataset it was trained on, which needs
+        the inputs themselves rather than a picture of them.
+        """
+        os.makedirs(self.debug_dir, exist_ok=True)
+        img = batch["image"]
+        rec = {
+            "step": self.step_i,
+            "speed": round(speed, 3),
+            "command": int(command),
+            "goal_x": round(float(goal[0]), 3),
+            "goal_y": round(float(goal[1]), 3),
+            "wp": [[round(float(a), 3), round(float(b), 3)] for a, b in wps],
+            "gate": round(float(out["gate"][0]), 4),
+            "steer": round(float(steer), 4),
+            "throttle": round(float(throttle), 4),
+            "brake": round(float(brake), 4),
+            # normalised-image moments: catch a colour-order or scaling error
+            "img_mean": round(float(img.mean()), 4),
+            "img_std": round(float(img.std()), 4),
+            # how much LiDAR actually survives the BEV crop
+            "n_pillars": int(batch["pillar_mask"].shape[0]),
+            "n_lidar_pts": int(batch["pillar_mask"].sum()),
+            "route_idx": self.idx,
+        }
+        with open(os.path.join(self.debug_dir, "trace.jsonl"), "a") as f:
+            f.write(json.dumps(rec) + "\n")
 
     def _dump_debug(self, strip, wps, speed, command, goal, out):
         """Occasional panel so a frame/sign error is visible immediately instead
