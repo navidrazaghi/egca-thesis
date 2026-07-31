@@ -32,6 +32,8 @@
 # Paths are resolved from this script's own location so a fresh
 # checkout works; the copies that produced the recorded results lived in
 # ~/scripts on the evaluation machine and differed only in that line.
+: "${DRY_RUN:=0}"   # walk the control flow without a simulator; see run_autopilot_val.sh
+
 set -u
 
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
@@ -52,6 +54,7 @@ ROUTES=$(seq 0 2 35)          # 18 of the 36, spread across all six towns
 # rewritten to the same one.
 mkdir -p "$WEATHER_DIR/split"
 for r in $ROUTES; do
+    [ "$DRY_RUN" = 1 ] && break
     src="$SPLIT/longest_weathers_$r.xml"
     dst="$WEATHER_DIR/split/longest_weathers_$r.xml"
     [ -s "$dst" ] && continue
@@ -62,6 +65,10 @@ echo "$(date +%T) weather route files ready"
 
 boot () {
     local port=$1
+    if [ "$DRY_RUN" = 1 ]; then
+        echo "[dry] boot carla on port $port"
+        return 0
+    fi
     docker rm -f "carla-rb-$port" >/dev/null 2>&1
     docker run -d --name "carla-rb-$port" --gpus all --net=host \
         -e NVIDIA_DRIVER_CAPABILITIES=all -v $ICD:$ICD:ro \
@@ -91,7 +98,12 @@ JSON
 }
 
 run_slot () {
-    local slot=$1 port=$((2000 + slot * 10)) tm=$((8100 + slot * 10))
+    # Separate assignments: bash expands all arguments of `local` before the
+    # builtin runs, so combining them evaluates the arithmetic while slot is
+    # still unset and `set -u` aborts the function immediately.
+    local slot=$1
+    local port=$((2000 + slot * 10))
+    local tm=$((8100 + slot * 10))
     boot "$port" || return 1
     local i=0 cfg cond r conf routes tag
     for cfg in $CONFIGS; do
@@ -109,6 +121,10 @@ run_slot () {
                 [ $((i % SLOTS)) -eq "$slot" ] || continue
                 tag="${cfg}__${cond}__r${r}"
                 [ -s "$OUT/$tag.json" ] && continue
+                if [ "$DRY_RUN" = 1 ]; then
+                    echo "[dry] $tag  port=$port routes=$routes"
+                    continue
+                fi
                 python -u "$LEADERBOARD_ROOT/leaderboard/leaderboard_evaluator.py" \
                     --routes="$routes/longest_weathers_$r.xml" \
                     --scenarios="$ROUTES6/eval_scenarios.json" \
@@ -121,7 +137,7 @@ run_slot () {
             done
         done
     done
-    docker rm -f "carla-rb-$port" >/dev/null 2>&1
+    [ "$DRY_RUN" = 0 ] && docker rm -f "carla-rb-$port" >/dev/null 2>&1
     echo "$(date +%T) [s$slot] finished"
 }
 
@@ -131,4 +147,4 @@ for s in $(seq 0 $((SLOTS - 1))); do
 done
 wait
 echo "ALLDONE"
-python tools/summarise_robustness.py --results "$OUT"
+[ "$DRY_RUN" = 0 ] && python tools/summarise_robustness.py --results "$OUT"

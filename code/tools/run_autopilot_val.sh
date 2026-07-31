@@ -26,15 +26,27 @@ AGENT="$HOME/transfuser/team_code_autopilot/autopilot.py"
 SLOTS=4
 mkdir -p "$OUT"
 
+# DRY_RUN=1 walks the whole control flow without a simulator or a GPU: every
+# loop, every variable expansion and every route assignment runs for real, only
+# the two expensive calls are stubbed.  This exists because the first attempt
+# died on an unbound variable inside a function and `bash -n` had reported the
+# file as fine -- syntax checking cannot see an expansion that only happens at
+# run time, so there was no way to find it short of burning the GPU window.
+: "${DRY_RUN:=0}"
+
 # ---- wait for the GPU ------------------------------------------------------
-while tmux has-session -t aug 2>/dev/null; do
+while [ "$DRY_RUN" = 0 ] && tmux has-session -t aug 2>/dev/null; do
     echo "$(date +%T) waiting for training to finish ..."
     sleep 300
 done
-echo "$(date +%T) GPU free, starting"
+[ "$DRY_RUN" = 0 ] && echo "$(date +%T) GPU free, starting"
 
 boot () {
     local port=$1
+    if [ "$DRY_RUN" = 1 ]; then
+        echo "[dry] boot carla on port $port"
+        return 0
+    fi
     docker rm -f "carla-ap-$port" >/dev/null 2>&1
     docker run -d --name "carla-ap-$port" --gpus all --net=host \
         -e NVIDIA_DRIVER_CAPABILITIES=all -v $ICD:$ICD:ro \
@@ -51,12 +63,25 @@ boot () {
 }
 
 run_slot () {
-    local slot=$1 port=$((2000 + slot * 10)) tm=$((8100 + slot * 10)) r
+    # One assignment per line, deliberately.  Bash expands every argument of
+    # `local` before the builtin runs, so `local slot=$1 port=$((slot*10))`
+    # evaluates the arithmetic while slot is still unset -- which under `set -u`
+    # kills the function on its first line.  That is what emptied all four slots
+    # on the first attempt and cost a three-hour GPU window, and `bash -n`
+    # cannot see it because the expansion only happens at run time.
+    local slot=$1
+    local port=$((2000 + slot * 10))
+    local tm=$((8100 + slot * 10))
+    local r
     boot "$port" || return 1
     for r in $(seq 0 35); do
         [ $((r % SLOTS)) -eq "$slot" ] || continue
         [ -s "$OUT/route_$r.json" ] && { echo "$(date +%T) [s$slot] route $r done"; continue; }
         echo "$(date +%T) [s$slot] route $r ..."
+        if [ "$DRY_RUN" = 1 ]; then
+            echo "[dry] slot=$slot route=$r port=$port tm=$tm"
+            continue
+        fi
         python -u "$LEADERBOARD_ROOT/leaderboard/leaderboard_evaluator.py" \
             --routes="$SPLIT/longest_weathers_$r.xml" \
             --scenarios="$ROUTES6/eval_scenarios.json" \
@@ -65,7 +90,7 @@ run_slot () {
             --track=MAP --port="$port" --trafficManagerPort="$tm" \
             > "$HOME/logs/ap_route_$r.log" 2>&1
     done
-    docker rm -f "carla-ap-$port" >/dev/null 2>&1
+    [ "$DRY_RUN" = 0 ] && docker rm -f "carla-ap-$port" >/dev/null 2>&1
     echo "$(date +%T) [s$slot] finished"
 }
 
