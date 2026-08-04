@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Ablation ladder on the published TransFuser dataset.
+#
+# The earlier ladder ran on our own collection and the control finished first:
+# mirror augmentation moved validation from 0.137 m to 0.133 m and the
+# train/val gap reopened, so regularisation was not the constraint. 50 routes
+# over 5 towns is. This dataset has 488 routes over 8 towns, and holding one
+# town out entirely measures generalisation to unseen layout rather than to
+# unseen frames of layouts already learned:
+#
+#     train 203,129 frames over 7 towns      val 55,737 frames of Town05
+#
+# Runs, ordered by expected value:
+#
+#   tf_base     the architecture as the thesis describes it. Nothing here is
+#               comparable to anything without it, since the control from our
+#               own data was trained on different frames.
+#
+#   tf_query    learned planning queries read the fused tokens; the GRU is gone
+#               and a dedicated head predicts target speed. Removes the mean
+#               pool that reduced 4536 spatial tokens to one vector, the late
+#               goal conditioning LEAD attributes +6.7 DS to fixing, and the
+#               coupling that made a standstill self-sustaining.
+#
+#   tf_regnet   RegNetY-3.2GF instead of ResNet-34. Both TransFuser and LEAD
+#               report the backbone as the most impactful architecture choice.
+#               Orthogonal to the readout, so it stacks with whichever wins.
+#
+# bev_classes=3 on every run: their HD map carries drivable area and lane
+# marking, so a six-class head would train three outputs against labels that do
+# not exist. Agents are in label_raw as boxes and could be rasterised later.
+#
+# 25 epochs rather than 40. The set is 1.5x larger, so this is close to the same
+# number of gradient steps the 40-epoch runs took on our data, and every run
+# here shares the schedule so the comparison stays internally consistent.
+#
+# Launch when the GPU is free:  bash tools/run_ladder_tf.sh
+set -u
+
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+source tools/eval_env.sh
+
+COMMON="data.source=transfuser model.aux.bev_classes=3 train.epochs=25"
+
+run () {
+    local name=$1; shift
+    if [ -f "checkpoints/$name/best.pth" ]; then
+        echo "$(date +%T) $name already trained, skipping"
+        return 0
+    fi
+    echo "$(date +%T) === training $name ==="
+    python -u -m egca.training.train \
+        --config configs/egca.yaml --seed 0 \
+        --set $COMMON "train.ckpt_dir=checkpoints/$name" "$@" \
+        > "$HOME/logs/train_$name.log" 2>&1
+    echo "$(date +%T) $name exit=$?"
+}
+
+run tf_base
+run tf_query  model.decoder.readout=query model.fusion.goal_injection=fusion
+run tf_regnet model.camera.backbone=regnet_y_3_2gf
+
+echo "LADDER_TF_DONE"
+printf '%-12s %9s %11s\n' run best_val final_train
+for n in tf_base tf_query tf_regnet; do
+    f="$HOME/logs/train_$n.log"
+    [ -f "$f" ] || continue
+    b=$(grep -o "val -\?[0-9.]* (wp [0-9.]* m)" "$f" | grep -o "wp [0-9.]*" \
+        | cut -d" " -f2 | sort -n | head -1)
+    t=$(grep -o "train -\?[0-9.]* (wp [0-9.]* m)" "$f" | grep -o "wp [0-9.]*" \
+        | cut -d" " -f2 | tail -1)
+    printf '%-12s %9s %11s\n' "$n" "$b" "$t"
+done

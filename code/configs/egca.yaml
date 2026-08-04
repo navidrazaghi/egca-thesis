@@ -77,6 +77,13 @@ control:
   creep_speed: 4.0
 
 data:
+  # own | transfuser.  "own" is the collected dataset below; "transfuser" reads
+  # the published dataset the baselines were trained on, which is what makes the
+  # comparison in Chapter 5 a measurement rather than a citation.
+  source: own
+  transfuser_root: ~/transfuser/data
+  tf_towns_val: [Town05]
+  tf_towns_all: [Town01, Town02, Town03, Town04, Town05, Town06, Town07, Town10HD]
   root: dataset/
   towns_train: [Town01, Town02, Town03, Town04, Town06]
   # Town05 is collected by nobody: it is the unseen town of the closed-loop

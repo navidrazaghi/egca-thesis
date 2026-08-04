@@ -80,11 +80,29 @@ def main():
 
     # Validation comes from held-out routes of the training towns; the unseen
     # town is never touched here (see CarlaDrivingDataset).
-    tr = CarlaDrivingDataset(cfg, cfg.data.towns_train, augment=True,
-                             synthetic_len=args.synthetic, split="train")
-    va = CarlaDrivingDataset(cfg, cfg.data.towns_train,
-                             synthetic_len=max(args.synthetic // 4, 0),
-                             split="val")
+    source = getattr(cfg.data, "source", "own")
+    if source == "transfuser":
+        # The published dataset the baselines were trained on: 258,866 frames
+        # over 488 routes and 8 towns, against 137k over ~50 routes here. Split
+        # by town rather than by route -- with eight available, holding two out
+        # measures generalisation to unseen layout rather than to unseen frames.
+        from ..data.transfuser_dataset import TransfuserDataset
+        root = os.path.expanduser(cfg.data.transfuser_root)
+        val_towns = list(getattr(cfg.data, "tf_towns_val", ["Town05"]))
+        all_towns = list(getattr(cfg.data, "tf_towns_all",
+                                 ["Town01", "Town02", "Town03", "Town04",
+                                  "Town05", "Town06", "Town07", "Town10HD"]))
+        train_towns = [t for t in all_towns if t not in val_towns]
+        tr = TransfuserDataset(cfg, root, train_towns, augment=True,
+                               split="train")
+        va = TransfuserDataset(cfg, root, val_towns, augment=False, split="val")
+        print(f"transfuser data: train towns {train_towns}, val {val_towns}")
+    else:
+        tr = CarlaDrivingDataset(cfg, cfg.data.towns_train, augment=True,
+                                 synthetic_len=args.synthetic, split="train")
+        va = CarlaDrivingDataset(cfg, cfg.data.towns_train,
+                                 synthetic_len=max(args.synthetic // 4, 0),
+                                 split="val")
     if not args.synthetic:
         print(f"train frames {len(tr)}   val frames {len(va)}")
     bs = min(cfg.train.batch_size, len(tr))
