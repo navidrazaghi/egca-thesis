@@ -43,19 +43,41 @@ cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
 THREADS_PER_SLOT=1
 source tools/eval_env.sh
 
-COMMON="data.source=transfuser model.aux.bev_classes=3 train.epochs=25"
+# Keep glibc from serving 465 MB batch tensors out of its heap.  Growing the
+# heap for allocations that size asks the kernel for high-order pages, and this
+# machine fails that request 87% of the time it tries: kcompactd sat at 25% of a
+# core, 3 GB of swap filled, and throughput decayed from 67 to 43 samples/s over
+# five epochs while 67 GB stayed available -- fragmentation, not exhaustion.
+# Routing anything over 1 MB straight to mmap sidesteps the heap entirely and
+# measured 90 samples/s against 52 on the identical step of an identical seed.
+export MALLOC_MMAP_THRESHOLD_=1048576
+export MALLOC_TRIM_THRESHOLD_=1048576
+export MALLOC_ARENA_MAX=2
+
+EPOCHS=25
+COMMON="data.source=transfuser model.aux.bev_classes=3 train.epochs=$EPOCHS"
 
 run () {
     local name=$1; shift
-    if [ -f "checkpoints/$name/best.pth" ]; then
-        echo "$(date +%T) $name already trained, skipping"
+    local done_epoch
+    # "best.pth exists" used to mean "already trained", which is wrong the
+    # moment a run is interrupted: best.pth is written from the first epoch
+    # onwards, so a run killed at epoch 5 of 25 looked complete and was skipped.
+    # Completion is now read from the log, and anything short of it resumes.
+    done_epoch=$(grep -c "^epoch " "$HOME/logs/train_$name.log" 2>/dev/null || echo 0)
+    if [ "$done_epoch" -ge "$EPOCHS" ]; then
+        echo "$(date +%T) $name already trained ($done_epoch epochs), skipping"
         return 0
     fi
-    echo "$(date +%T) === training $name ==="
+    if [ "$done_epoch" -gt 0 ]; then
+        echo "$(date +%T) === resuming $name from epoch $done_epoch ==="
+    else
+        echo "$(date +%T) === training $name ==="
+    fi
     python -u -m egca.training.train \
-        --config configs/egca.yaml --seed 0 \
+        --config configs/egca.yaml --seed 0 --resume \
         --set $COMMON "train.ckpt_dir=checkpoints/$name" "$@" \
-        > "$HOME/logs/train_$name.log" 2>&1
+        >> "$HOME/logs/train_$name.log" 2>&1
     echo "$(date +%T) $name exit=$?"
 }
 

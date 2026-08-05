@@ -89,6 +89,8 @@ def main():
     ap.add_argument("--synthetic", type=int, default=0,
                     help="use N random samples instead of real data (smoke test)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue from last.pth in the checkpoint directory")
     ap.add_argument("--seed", type=int, default=0,
                     help="seed for the run; the three-seed protocol of Sec. 5-2 "
                          "needs this to vary initialization and data order")
@@ -167,13 +169,21 @@ def main():
         cv2.setNumThreads(0)
         torch.set_num_threads(1)
 
+    # pin_memory defaults off here, which is the opposite of the usual advice.
+    # A batch is 465 MB, and pinned pages cannot be moved or swapped, so several
+    # in flight fragment host memory badly enough that kcompactd took 25% of a
+    # core, 3 GB of swap filled, and throughput fell from 67 to 43 samples/s
+    # over five epochs. Pinning buys faster host-to-device copies, and this
+    # loader is bound by random reads off a 234 GB dataset -- the transfer was
+    # never the constraint.
     nw = 0 if args.synthetic else cfg.train.num_workers
+    pin = bool(getattr(cfg.train, "pin_memory", False))
     extra = dict(persistent_workers=True, prefetch_factor=2,
                  worker_init_fn=_pin_threads) if nw else {}
     dl_tr = DataLoader(tr, batch_size=bs, shuffle=True, collate_fn=collate,
-                       num_workers=nw, pin_memory=True, drop_last=True, **extra)
+                       num_workers=nw, pin_memory=pin, drop_last=True, **extra)
     dl_va = DataLoader(va, batch_size=bs, collate_fn=collate,
-                       num_workers=nw, pin_memory=True, **extra)
+                       num_workers=nw, pin_memory=pin, **extra)
 
     model = EGCAPolicy(cfg, sensor_dropout=cfg.train.sensor_dropout).to(device)
     criterion = UncertaintyWeightedLoss(
@@ -188,9 +198,30 @@ def main():
     writer = SummaryWriter(os.path.join(cfg.train.ckpt_dir, "tb"))
     print(f"model parameters: {model.num_parameters() / 1e6:.1f} M")
 
-    best, step = float("inf"), 0
+    best, step, start_epoch = float("inf"), 0, 0
+    # A run on this dataset is most of a day, and this machine has already lost
+    # one to a dead simulator and one to swap thrash. Resuming needs the
+    # optimizer's Adam moments and the loss weights' own parameters as well as
+    # the model: restoring weights alone restarts the moment estimates from
+    # zero, which puts a visible transient in the loss and makes the epoch
+    # numbers either side of a restart not comparable.
+    resume = os.path.join(cfg.train.ckpt_dir, "last.pth")
+    if args.resume and os.path.exists(resume):
+        state = torch.load(resume, map_location=device, weights_only=False)
+        model.load_state_dict(state["model"])
+        criterion.load_state_dict(state["criterion"])
+        if "optimizer" in state:
+            optimizer.load_state_dict(state["optimizer"])
+            scaler.load_state_dict(state["scaler"])
+            best, step = state["best"], state["step"]
+            start_epoch = state["epoch"] + 1
+            print(f"resumed from epoch {state['epoch']}, best val {best:.4f}")
+        else:
+            print(f"{resume} predates optimizer checkpointing; "
+                  f"starting from scratch rather than resuming without it")
+
     epochs = cfg.train.epochs if not args.synthetic else 2
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         cosine_warmup(optimizer, epoch, cfg)
         t0 = time.time()
         tr_stats, step = run_epoch(model, criterion, dl_tr, optimizer, scaler,
@@ -208,11 +239,18 @@ def main():
               f"(wp {va_stats['wp']:.3f} m)  lr {optimizer.param_groups[0]['lr']:.2e}"
               f"  ({time.time() - t0:.0f}s)")
         writer.add_scalar("val/wp_metres", va_stats["wp"], epoch)
-        ckpt = {"model": model.state_dict(), "criterion": criterion.state_dict(),
-                "cfg": dict(cfg), "epoch": epoch}
-        torch.save(ckpt, os.path.join(cfg.train.ckpt_dir, "last.pth"))
-        if va_stats["total"] < best:
+        # `best` is updated before the checkpoint is built, not after: a resumed
+        # run that carried a stale `best` would let the next epoch overwrite
+        # best.pth with a worse model than the one already on disk.
+        improved = va_stats["total"] < best
+        if improved:
             best = va_stats["total"]
+        ckpt = {"model": model.state_dict(), "criterion": criterion.state_dict(),
+                "cfg": dict(cfg), "epoch": epoch,
+                "optimizer": optimizer.state_dict(),
+                "scaler": scaler.state_dict(), "best": best, "step": step}
+        torch.save(ckpt, os.path.join(cfg.train.ckpt_dir, "last.pth"))
+        if improved:
             torch.save(ckpt, os.path.join(cfg.train.ckpt_dir, "best.pth"))
 
 

@@ -59,6 +59,9 @@ train:
   flip_prob: 0.5
   amp: true
   num_workers: 24
+  # Off deliberately: pinned pages cannot be moved, and 465 MB batches in flight
+  # fragmented host memory badly enough to halve throughput.  See train.py.
+  pin_memory: false
   log_every: 50
   ckpt_dir: checkpoints/egca
 
