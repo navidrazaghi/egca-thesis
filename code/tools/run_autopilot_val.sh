@@ -23,7 +23,11 @@ ICD=/usr/share/vulkan/icd.d/nvidia_icd.json
 SPLIT="$ROUTES6/longest6_split"
 OUT="$HOME/thesis/code/results/autopilot_val"
 AGENT="$HOME/transfuser/team_code_autopilot/autopilot.py"
-SLOTS=4
+# Routes are handed to slots by `route % SLOTS`, so the divisor also decides how
+# a partial re-run spreads.  The six routes lost to slot 0's dead simulator are
+# all multiples of 4 and would queue up behind each other again at SLOTS=4;
+# SLOTS=3 puts two in each slot instead.  Overridable for exactly that reason.
+: "${SLOTS:=4}"
 mkdir -p "$OUT"
 
 # DRY_RUN=1 walks the whole control flow without a simulator or a GPU: every
@@ -62,6 +66,20 @@ boot () {
     echo "$(date +%T) carla FAILED on $port"; return 1
 }
 
+# A route counts as done only when its checkpoint holds a scored record.  The
+# evaluator writes the file early and exits 0 on a simulator it can no longer
+# talk to, so neither the exit code nor the file's existence is sufficient on
+# its own -- the first run of this script lost six routes because slot 0's
+# simulator died after three and every later route was skipped in silence.
+scored () {
+    [ -s "$1" ] || return 1
+    python - "$1" <<'PYEOF' >/dev/null 2>&1
+import json, sys
+recs = json.load(open(sys.argv[1]))["_checkpoint"].get("records", [])
+sys.exit(0 if recs and "score_composed" in recs[0].get("scores", {}) else 1)
+PYEOF
+}
+
 run_slot () {
     # One assignment per line, deliberately.  Bash expands every argument of
     # `local` before the builtin runs, so `local slot=$1 port=$((slot*10))`
@@ -73,22 +91,36 @@ run_slot () {
     local port=$((2000 + slot * 10))
     local tm=$((8100 + slot * 10))
     local r
+    local try
+    local rc
     boot "$port" || return 1
     for r in $(seq 0 35); do
         [ $((r % SLOTS)) -eq "$slot" ] || continue
-        [ -s "$OUT/route_$r.json" ] && { echo "$(date +%T) [s$slot] route $r done"; continue; }
-        echo "$(date +%T) [s$slot] route $r ..."
+        if scored "$OUT/route_$r.json"; then
+            echo "$(date +%T) [s$slot] route $r done"; continue
+        fi
         if [ "$DRY_RUN" = 1 ]; then
             echo "[dry] slot=$slot route=$r port=$port tm=$tm"
             continue
         fi
-        python -u "$LEADERBOARD_ROOT/leaderboard/leaderboard_evaluator.py" \
-            --routes="$SPLIT/longest_weathers_$r.xml" \
-            --scenarios="$ROUTES6/eval_scenarios.json" \
-            --agent="$AGENT" \
-            --checkpoint="$OUT/route_$r.json" \
-            --track=MAP --port="$port" --trafficManagerPort="$tm" \
-            > "$HOME/logs/ap_route_$r.log" 2>&1
+        # Two attempts, the second on a freshly booted simulator.  A crashed
+        # CARLA poisons every route that follows it in this slot, so the retry
+        # is what keeps one dead simulator from costing a quarter of the run.
+        for try in 1 2; do
+            echo "$(date +%T) [s$slot] route $r attempt $try ..."
+            python -u "$LEADERBOARD_ROOT/leaderboard/leaderboard_evaluator.py" \
+                --routes="$SPLIT/longest_weathers_$r.xml" \
+                --scenarios="$ROUTES6/eval_scenarios.json" \
+                --agent="$AGENT" \
+                --checkpoint="$OUT/route_$r.json" \
+                --track=MAP --port="$port" --trafficManagerPort="$tm" \
+                > "$HOME/logs/ap_route_$r.log" 2>&1
+            rc=$?
+            scored "$OUT/route_$r.json" && break
+            echo "$(date +%T) [s$slot] route $r UNSCORED (exit $rc)"
+            rm -f "$OUT/route_$r.json"
+            [ "$try" = 1 ] && { boot "$port" || return 1; }
+        done
     done
     [ "$DRY_RUN" = 0 ] && docker rm -f "carla-ap-$port" >/dev/null 2>&1
     echo "$(date +%T) [s$slot] finished"

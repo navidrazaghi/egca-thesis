@@ -58,7 +58,7 @@ train:
   # than approximating it; see dataset._mirror.  Set 0.0 to disable.
   flip_prob: 0.5
   amp: true
-  num_workers: 8
+  num_workers: 24
   log_every: 50
   ckpt_dir: checkpoints/egca
 
@@ -84,6 +84,11 @@ data:
   transfuser_root: ~/transfuser/data
   tf_towns_val: [Town05]
   tf_towns_all: [Town01, Town02, Town03, Town04, Town05, Town06, Town07, Town10HD]
+  # Evenly spaced subset of the held-out town used for per-epoch validation.
+  # 0 disables it.  8000 frames is a 2.6% standard error on the waypoint error,
+  # an order of magnitude below the epoch-to-epoch movement it has to resolve,
+  # and it returns a fifth of the run's disk budget to training.
+  val_max_frames: 8000
   root: dataset/
   towns_train: [Town01, Town02, Town03, Town04, Town06]
   # Town05 is collected by nobody: it is the unseen town of the closed-loop

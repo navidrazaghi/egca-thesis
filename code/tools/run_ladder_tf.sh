@@ -38,6 +38,9 @@
 set -u
 
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+# One thread per process before the pools are sized: the 24 loader workers each
+# inherit this, and the CPU work happens inside them, not in the parent.
+THREADS_PER_SLOT=1
 source tools/eval_env.sh
 
 COMMON="data.source=transfuser model.aux.bev_classes=3 train.epochs=25"
@@ -58,11 +61,20 @@ run () {
 
 run tf_base
 run tf_query  model.decoder.readout=query model.fusion.goal_injection=fusion
-run tf_regnet model.camera.backbone=regnet_y_3_2gf
+
+# tf_regnet is deliberately not run here.  Each rung is about 22 h -- the loader
+# is bound by random reads over 234 GB against 88 GB of page cache, not by the
+# GPU -- and the two rungs above are the ones Chapter 5 cannot be written
+# without: one number comparable to the published baselines, and one ablation
+# that attributes part of it to the mechanism the thesis proposes.  The backbone
+# swap is orthogonal to both, so it can be run afterwards without invalidating
+# anything already measured:
+#
+#   bash tools/run_ladder_tf.sh   # after adding: run tf_regnet model.camera.backbone=regnet_y_3_2gf
 
 echo "LADDER_TF_DONE"
 printf '%-12s %9s %11s\n' run best_val final_train
-for n in tf_base tf_query tf_regnet; do
+for n in tf_base tf_query; do
     f="$HOME/logs/train_$n.log"
     [ -f "$f" ] || continue
     b=$(grep -o "val -\?[0-9.]* (wp [0-9.]* m)" "$f" | grep -o "wp [0-9.]*" \

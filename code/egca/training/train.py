@@ -35,12 +35,25 @@ def cosine_warmup(optimizer, epoch, cfg):
 def run_epoch(model, criterion, loader, optimizer, scaler, device, cfg,
               writer=None, step0=0, train=True):
     model.train(train)
-    agg, n = {}, 0
+    agg, n, skipped = {}, 0, 0
+    t0 = time.time()
     for i, batch in enumerate(loader):
         batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
         with torch.autocast(device_type=device.type, enabled=cfg.train.amp):
             out = model(batch)
             loss, parts = criterion(out, batch)
+        # A single non-finite batch used to sink a whole run in silence: the
+        # epoch average went to NaN, the weights absorbed it, and the log said
+        # only "train nan" with no indication of how many batches or when. The
+        # cause was a dataset defect that the loader now filters, so this should
+        # never fire -- which is exactly why it reports rather than just skips.
+        if not torch.isfinite(loss):
+            skipped += 1
+            if skipped <= 3:
+                print(f"  batch {i}: non-finite loss, skipped "
+                      f"({', '.join(f'{k}={v:.3g}' for k, v in parts.items())})",
+                      flush=True)
+            continue
         if train:
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -51,9 +64,21 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, cfg,
         for k, v in parts.items():
             agg[k] = agg.get(k, 0.0) + v
         n += 1
-        if train and writer and i % cfg.train.log_every == 0:
-            for k, v in parts.items():
-                writer.add_scalar(f"train/{k}", v, step0 + i)
+        if train and i % cfg.train.log_every == 0:
+            if writer:
+                for k, v in parts.items():
+                    writer.add_scalar(f"train/{k}", v, step0 + i)
+            # An epoch on this dataset is nearly an hour, so without this the
+            # log is silent for the length of a film and a diverging run is
+            # only visible once it has burned the hour. The running mean is the
+            # epoch's own aggregate, not the batch, so it is comparable to the
+            # epoch line that follows.
+            rate = (i + 1) * loader.batch_size / max(time.time() - t0, 1e-6)
+            print(f"  step {i:5d}/{len(loader)}  "
+                  f"loss {agg['total'] / max(n, 1):.4f}  "
+                  f"{rate:.0f} samples/s", flush=True)
+    if skipped:
+        print(f"  {skipped} non-finite batches skipped this pass", flush=True)
     return {k: v / max(n, 1) for k, v in agg.items()}, step0 + n
 
 
@@ -96,6 +121,19 @@ def main():
         tr = TransfuserDataset(cfg, root, train_towns, augment=True,
                                split="train")
         va = TransfuserDataset(cfg, root, val_towns, augment=False, split="val")
+        # Validation is a monitoring and model-selection signal, and the loader
+        # is bound by disk throughput, so scoring all 55,737 Town05 frames every
+        # epoch spends a fifth of the run's I/O -- twenty-five times over -- to
+        # sharpen a number that is already far inside its own epoch-to-epoch
+        # noise. An evenly spaced subset is deterministic, covers every route in
+        # the town, and is the same frames every epoch, which is what model
+        # selection actually requires.
+        cap = int(getattr(cfg.data, "val_max_frames", 0) or 0)
+        if 0 < cap < len(va):
+            stride = len(va) / cap
+            va.frames = [va.frames[int(i * stride)] for i in range(cap)]
+            print(f"validation subsampled to {len(va)} of {int(stride * cap)} "
+                  f"frames (every ~{stride:.0f}th)")
         print(f"transfuser data: train towns {train_towns}, val {val_towns}")
     else:
         tr = CarlaDrivingDataset(cfg, cfg.data.towns_train, augment=True,
@@ -110,11 +148,32 @@ def main():
         # smoke test: the configured batch (Table 5-2) assumes 4 x 24 GB GPUs;
         # with N_l = 4096 tokens it does not fit on a single small device.
         bs = min(bs, 4)
+    # The TransFuser set is 234 GB against 88 GB of page cache, so nearly every
+    # read is a cold random one and a worker spends most of a sample blocked on
+    # the disk rather than on the CPU: 155 ms per sample, of which about 40 ms
+    # is decode. Workers therefore oversubscribe the cores on purpose, and they
+    # are kept alive across epochs because respawning 24 of them and refilling
+    # their queues costs more than the epoch boundary saves. Threads are pinned
+    # to one per worker for the same reason -- 24 workers each opening an
+    # OpenCV thread pool is what turned 32 cores into 536 threads before.
+    #
+    # prefetch_factor stays at the default 2. One batch of 128 is 465 MB, most
+    # of it the padded pillar tensors, so the queue holds num_workers * 2 * 465
+    # MB: at 24 workers that is 22 GB of the machine's 88, and raising it to 4
+    # would take 45 GB out of the page cache that this same disk-bound loader
+    # depends on.
+    def _pin_threads(_worker_id):
+        import cv2
+        cv2.setNumThreads(0)
+        torch.set_num_threads(1)
+
+    nw = 0 if args.synthetic else cfg.train.num_workers
+    extra = dict(persistent_workers=True, prefetch_factor=2,
+                 worker_init_fn=_pin_threads) if nw else {}
     dl_tr = DataLoader(tr, batch_size=bs, shuffle=True, collate_fn=collate,
-                       num_workers=0 if args.synthetic else cfg.train.num_workers,
-                       pin_memory=True, drop_last=True)
+                       num_workers=nw, pin_memory=True, drop_last=True, **extra)
     dl_va = DataLoader(va, batch_size=bs, collate_fn=collate,
-                       num_workers=0 if args.synthetic else cfg.train.num_workers)
+                       num_workers=nw, pin_memory=True, **extra)
 
     model = EGCAPolicy(cfg, sensor_dropout=cfg.train.sensor_dropout).to(device)
     criterion = UncertaintyWeightedLoss(

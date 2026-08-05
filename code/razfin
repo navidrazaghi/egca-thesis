@@ -61,64 +61,6 @@ def to_ego(points_world, ego_xy, theta):
     return np.stack([-local[..., 1], -local[..., 0]], axis=-1)
 
 
-def decode_topdown(path, out_hw):
-    """Their encoded BEV PNG -> our class raster (0 free, 1 road, 2 lane).
-
-    The PNG packs fifteen binary layers into five bit-planes of three colour
-    channels; their own loader keeps channels 10 and 11, which are bit 7 and
-    bit 6 of the blue channel and carry drivable area and lane marking.  The
-    remaining layers describe agents and are read from `label_raw` instead, so
-    the raster here is the same three-class HD-map target their paper uses
-    rather than a partly-filled version of ours.
-    """
-    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-    if img is None:
-        raise RuntimeError(f"unreadable topdown: {path}")
-    blue = img[:, :, 0]                      # cv2 loads BGR; blue is index 0
-    road = (blue & (1 << 7)) > 0
-    lane = (blue & (1 << 6)) > 0
-    seg = np.zeros(blue.shape, dtype=np.int64)
-    seg[road] = 1
-    seg[lane] = 2                            # lane wins where both are set
-    h, w = out_hw
-    if seg.shape != (h, w):
-        seg = cv2.resize(seg.astype(np.uint8), (w, h),
-                         interpolation=cv2.INTER_NEAREST).astype(np.int64)
-    return seg
-
-
-def decode_depth(path, out_hw, crop_w, near=1.0, far=100.0):
-    """Their depth PNG -> the normalised inverse depth this model is trained on.
-
-    CARLA packs metric depth into three bytes; their loader rescales it linearly
-    and clips at 50 m, ours uses inverse depth so that resolution concentrates
-    in the near field where driving decisions are made.  Converting to metres
-    first and then applying our own transform keeps the target identical in
-    meaning to the one the collected dataset stores, which is what lets the same
-    loss and the same head work unchanged across both sources.
-    """
-    img = cv2.imread(path, cv2.IMREAD_COLOR)
-    if img is None:
-        raise RuntimeError(f"unreadable depth: {path}")
-    b, g, r = img[:, :, 0].astype(np.float32), img[:, :, 1].astype(np.float32), \
-        img[:, :, 2].astype(np.float32)
-    # Byte order determined by measurement, not by the documented CARLA formula.
-    # That formula (R + G*256 + B*65536) puts the median pixel of these images
-    # at 644 m with only 4% of the scene inside 50 m, which no street can be;
-    # reversing the ends gives a median of 16-63 m and roughly two thirds of the
-    # scene within 50 m.  Their own loader also reads the channels this way.
-    metres = (b + g * 256.0 + r * 65536.0) / (256 ** 3 - 1) * 1000.0
-    if metres.shape[1] != crop_w:            # match the RGB crop exactly
-        x0 = (metres.shape[1] - crop_w) // 2
-        metres = metres[:, x0:x0 + crop_w]
-    d = np.clip(metres, near, far)
-    inv = (1.0 / d - 1.0 / far) / (1.0 / near - 1.0 / far)
-    h, w = out_hw
-    if inv.shape != (h, w):
-        inv = cv2.resize(inv, (w, h), interpolation=cv2.INTER_AREA)
-    return inv.astype(np.float32)
-
-
 def load_lidar(path):
     """Their .npy is an object array; the point cloud is its second element."""
     raw = np.load(path, allow_pickle=True)
@@ -178,8 +120,7 @@ class TransfuserDataset(Dataset):
             img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
         return img
 
-    def _pose(self, idx):
-        """Ego-frame targets for one frame, or None if its pose is unusable."""
+    def __getitem__(self, idx):
         route, fid = self.frames[idx]
         with open(os.path.join(route, "measurements", fid + ".json")) as f:
             meas = json.load(f)
@@ -189,44 +130,13 @@ class TransfuserDataset(Dataset):
         if not np.isfinite(theta):               # the IMU occasionally returns NaN
             theta = 0.0
 
-        wp_world = np.asarray(meas["waypoints"], dtype=np.float64)
-        wp_world = wp_world[:, :2] if wp_world.size else np.zeros((0, 2))
+        wp_world = np.asarray(meas["waypoints"], dtype=np.float64)[:, :2]
         wp = to_ego(wp_world, ego, theta)[:self.horizon]
-        if len(wp) == 0:                         # no future recorded at all
-            return None
         if len(wp) < self.horizon:               # end of route: hold the last pose
             wp = np.vstack([wp, np.repeat(wp[-1:], self.horizon - len(wp), 0)])
 
         goal = to_ego(np.array([meas["x_command"], meas["y_command"]]),
                       ego, theta)
-        speed = float(meas["speed"])
-        if not (np.isfinite(wp).all() and np.isfinite(goal).all()
-                and np.isfinite(speed)):
-            return None
-        return meas, wp, goal, speed
-
-    def __getitem__(self, idx):
-        # Roughly one frame in 1500 stores its entire waypoint block as NaN --
-        # the expert's own recorder, not this conversion. At batch 128 over
-        # 203k frames that is about 135 poisoned batches per epoch, which is
-        # what turned the training loss into NaN from epoch 0 while validation
-        # started healthy and then decayed as the weights absorbed it; a
-        # batch-8 smoke test touches 296 samples and sails straight past it.
-        # Substituting a standstill would be worse than the NaN, since it
-        # teaches the model to stop at a junction for no visible reason, so the
-        # sample is served from a neighbouring frame instead. Walking backwards
-        # deterministically keeps the dataset length fixed and the run
-        # reproducible from its seed.
-        pose = None
-        for k in range(8):
-            pose = self._pose((idx - k) % len(self.frames))
-            if pose is not None:
-                idx = (idx - k) % len(self.frames)
-                break
-        if pose is None:
-            raise RuntimeError(f"eight consecutive unusable frames near {idx}")
-        meas, wp, goal, speed = pose
-        route, fid = self.frames[idx]
 
         img = self._image(route, fid)
         pts = load_lidar(os.path.join(route, "lidar", fid + ".npy"))
@@ -240,21 +150,11 @@ class TransfuserDataset(Dataset):
         img = (img / 255.0 - np.array([0.485, 0.456, 0.406])) \
             / np.array([0.229, 0.224, 0.225])
         feats, coords, mask = pillarize(pts, self.cfg.model.lidar)
-        out = {
+        return {
             "image": torch.from_numpy(img.transpose(2, 0, 1).copy()).float(),
             "pillar_feats": feats, "pillar_coords": coords, "pillar_mask": mask,
-            "speed": torch.tensor([speed], dtype=torch.float32),
+            "speed": torch.tensor([meas["speed"]], dtype=torch.float32),
             "command": torch.tensor(command, dtype=torch.long),
             "goal": torch.from_numpy(goal.astype(np.float32)),
             "waypoints": torch.from_numpy(wp.astype(np.float32)),
         }
-        if self.cfg.model.aux.bev_seg:
-            seg = decode_topdown(
-                os.path.join(route, "topdown", "encoded_" + fid + ".png"),
-                self.seg_hw)
-            out["bev_seg"] = torch.from_numpy(seg)
-        if self.cfg.model.aux.depth:
-            dep = decode_depth(os.path.join(route, "depth", fid + ".png"),
-                               self.depth_hw, self.img_hw[1])
-            out["depth"] = torch.from_numpy(dep).unsqueeze(0)
-        return out
