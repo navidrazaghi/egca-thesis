@@ -48,7 +48,12 @@ model:
 
 train:
   epochs: 60
-  batch_size: 128
+  # Effective batch is 128 (Table 5-2), reached as 64 x 2 accumulation steps.
+  # Peak memory at a true 128 is 36.4 GiB of the card's 39.5 with the mean-pool
+  # readout -- which OOM'd at epoch 7 on an unusually dense point cloud -- and
+  # the query readout does not fit at 128 at all.
+  batch_size: 64
+  grad_accum: 2
   lr: 1.0e-4
   weight_decay: 1.0e-4
   warmup_epochs: 2

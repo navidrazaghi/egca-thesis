@@ -78,7 +78,13 @@ run () {
         --config configs/egca.yaml --seed 0 --resume \
         --set $COMMON "train.ckpt_dir=checkpoints/$name" "$@" \
         >> "$HOME/logs/train_$name.log" 2>&1
-    echo "$(date +%T) $name exit=$?"
+    # $? must be captured before anything else runs.  Writing
+    # `echo "$(date +%T) ... exit=$?"` reads the exit status of `date`, which is
+    # always 0, so both runs reported success after dying of CUDA OOM and the
+    # ladder marched on to the next rung and then declared itself done.
+    local rc=$?
+    echo "$(date +%T) $name exit=$rc"
+    return $rc
 }
 
 run tf_base

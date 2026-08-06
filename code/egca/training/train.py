@@ -36,7 +36,10 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, cfg,
               writer=None, step0=0, train=True):
     model.train(train)
     agg, n, skipped = {}, 0, 0
+    accum = max(int(getattr(cfg.train, "grad_accum", 1)), 1)
     t0 = time.time()
+    if train:
+        optimizer.zero_grad(set_to_none=True)
     for i, batch in enumerate(loader):
         batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
         with torch.autocast(device_type=device.type, enabled=cfg.train.amp):
@@ -55,12 +58,24 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, cfg,
                       flush=True)
             continue
         if train:
-            optimizer.zero_grad(set_to_none=True)
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-            scaler.step(optimizer)
-            scaler.update()
+            # Gradients accumulate over `accum` micro-batches before a step, so
+            # the effective batch stays the 128 of Table 5-2 while only 64
+            # samples of activations are alive at once. The measured peak is
+            # 36.4 GiB at 128 against 39.5 available -- three gigabytes of head
+            # room, and the pillar count varies per batch, which is what killed
+            # tf_base at epoch 7 after six clean ones. The query readout does
+            # not fit at 128 at all.
+            #
+            # Dividing by `accum` matters: without it the summed gradient is
+            # `accum` times too large and the run is silently training at a
+            # different learning rate than the one reported.
+            scaler.scale(loss / accum).backward()
+            if (i + 1) % accum == 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
         for k, v in parts.items():
             agg[k] = agg.get(k, 0.0) + v
         n += 1
@@ -77,6 +92,11 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, cfg,
             print(f"  step {i:5d}/{len(loader)}  "
                   f"loss {agg['total'] / max(n, 1):.4f}  "
                   f"{rate:.0f} samples/s", flush=True)
+    # An epoch whose batch count is not a multiple of `accum` ends holding
+    # gradients from a partial group. Applying them would weight the last few
+    # samples of every epoch by 1/accum against the rest, so they are dropped.
+    if train and len(loader) % accum:
+        optimizer.zero_grad(set_to_none=True)
     if skipped:
         print(f"  {skipped} non-finite batches skipped this pass", flush=True)
     return {k: v / max(n, 1) for k, v in agg.items()}, step0 + n
