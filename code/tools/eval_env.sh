@@ -22,6 +22,23 @@ export CARLA_ROOT LEADERBOARD_ROOT SCENARIO_RUNNER_ROOT EGCA_ROOT
 
 export ROUTES6=$LEADERBOARD_ROOT/data/longest6
 
+# Longest6 is not the stock leaderboard protocol, and using the stock evaluator
+# for it silently produces numbers that cannot be compared with any published
+# Longest6 result.  TransFuser's own README says the benchmark runs through the
+# `*_local.py` copies, which differ in two ways that push the score in opposite
+# directions:
+#
+#   * dense traffic (route_scenario_local.py) -- harder, lowers route completion
+#   * no penalty for stop-sign infractions (statistics_manager_local.py)
+#
+# Measured on this project's own autopilot validation, the two are worth a great
+# deal.  Scored the stock way: RC 87.94, IS 0.757, DS 67.52.  Removing only the
+# stop penalty: IS 0.916, DS 82.82, against their published 0.89 and 74.49.  The
+# remaining gap is the traffic density -- our RC came out above theirs because
+# the benchmark was running lighter, not because the agent drove better.
+: "${EVALUATOR:=$LEADERBOARD_ROOT/leaderboard/leaderboard_evaluator_local.py}"
+export EVALUATOR
+
 # `leaderboard_agent.py` is loaded by the evaluator as a standalone module from
 # its path, so it has no parent package and must import `egca.*` absolutely --
 # hence $EGCA_ROOT on the path.  $CARLA_ROOT/carla/agents is needed because the

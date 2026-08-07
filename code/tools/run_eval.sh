@@ -145,7 +145,7 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
     echo "$(date +%F\ %T) [$TAG] attempt $attempt, resume=$RESUME, at $done_n routes"
 
     # -u so the log is live rather than sitting in the pipe buffer
-    python -u "$LEADERBOARD_ROOT/leaderboard/leaderboard_evaluator.py" \
+    python -u "$EVALUATOR" \
         --routes="$ROUTES" \
         --scenarios="$ROUTES6/eval_scenarios.json" \
         --agent=egca/carla_sim/leaderboard_agent.py \

@@ -11,6 +11,13 @@
 # The agent is privileged and needs none of the mmcv/mmdet stack that blocked
 # the sensor-based baselines, so it runs in the ordinary evaluation environment.
 #
+# It must run through $EVALUATOR, which is the Longest6 `*_local.py` copy -- see
+# tools/eval_env.sh.  A first pass of this script used the stock evaluator and
+# produced RC 87.94 against their published 82.71, which looked like a pass and
+# was not: the stock evaluator runs lighter traffic, so the benchmark was easier,
+# and it also penalises stop-sign infractions, which Longest6 does not.  Results
+# produced that way are not comparable with anything and were discarded.
+#
 # Waits for the training run to release the GPU before starting.
 # Paths are resolved from this script's own location so a fresh
 # checkout works; the copies that produced the recorded results lived in
@@ -39,7 +46,12 @@ mkdir -p "$OUT"
 : "${DRY_RUN:=0}"
 
 # ---- wait for the GPU ------------------------------------------------------
-while [ "$DRY_RUN" = 0 ] && tmux has-session -t aug 2>/dev/null; do
+# Watching one hard-coded session name was wrong the moment the training session
+# was called something else: this waited on `aug`, the ladder runs as `ladder`,
+# so the check passed instantly and four simulators would have been started on
+# top of a training run that already holds most of the card. Look for the
+# process, not for what someone named its window.
+while [ "$DRY_RUN" = 0 ] && pgrep -f "python -u -m egca.training.train" >/dev/null; do
     echo "$(date +%T) waiting for training to finish ..."
     sleep 300
 done
@@ -108,7 +120,7 @@ run_slot () {
         # is what keeps one dead simulator from costing a quarter of the run.
         for try in 1 2; do
             echo "$(date +%T) [s$slot] route $r attempt $try ..."
-            python -u "$LEADERBOARD_ROOT/leaderboard/leaderboard_evaluator.py" \
+            python -u "$EVALUATOR" \
                 --routes="$SPLIT/longest_weathers_$r.xml" \
                 --scenarios="$ROUTES6/eval_scenarios.json" \
                 --agent="$AGENT" \

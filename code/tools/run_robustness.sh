@@ -125,7 +125,7 @@ run_slot () {
                     echo "[dry] $tag  port=$port routes=$routes"
                     continue
                 fi
-                python -u "$LEADERBOARD_ROOT/leaderboard/leaderboard_evaluator.py" \
+                python -u "$EVALUATOR" \
                     --routes="$routes/longest_weathers_$r.xml" \
                     --scenarios="$ROUTES6/eval_scenarios.json" \
                     --agent=egca/carla_sim/leaderboard_agent.py \
