@@ -89,9 +89,18 @@ def run_epoch(model, criterion, loader, optimizer, scaler, device, cfg,
             # epoch's own aggregate, not the batch, so it is comparable to the
             # epoch line that follows.
             rate = (i + 1) * loader.batch_size / max(time.time() - t0, 1e-6)
+            # Peak memory and token count are logged because a query-readout run
+            # sat at 22.4 GiB for seventy seconds and then jumped to 40.4 and
+            # died, and neither the steady state nor the architectural worst
+            # case -- every sample padded to max_pillars, measured at 22.35 GiB
+            # -- explains that. Whatever the spike is, it will be in this line
+            # the next time rather than only in a traceback.
+            mem = (torch.cuda.max_memory_allocated() / 2 ** 30
+                   if device.type == "cuda" else 0.0)
             print(f"  step {i:5d}/{len(loader)}  "
                   f"loss {agg['total'] / max(n, 1):.4f}  "
-                  f"{rate:.0f} samples/s", flush=True)
+                  f"{rate:.0f} samples/s  peak {mem:.1f} GiB  "
+                  f"pillars {batch['pillar_feats'].shape[0]}", flush=True)
     # An epoch whose batch count is not a multiple of `accum` ends holding
     # gradients from a partial group. Applying them would weight the last few
     # samples of every epoch by 1/accum against the rest, so they are dropped.

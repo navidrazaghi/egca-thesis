@@ -54,6 +54,14 @@ export MALLOC_MMAP_THRESHOLD_=1048576
 export MALLOC_TRIM_THRESHOLD_=1048576
 export MALLOC_ARENA_MAX=2
 
+# The same class of problem on the card.  A batch's pillar tensor varies from a
+# few thousand rows to over a hundred thousand depending on how cluttered the
+# scene is, and the caching allocator fragments on that spread until it cannot
+# find a contiguous block: tf_query died reporting 38.4 GiB allocated when the
+# same configuration measures a 21.2 GiB peak over twenty-five batches with
+# expandable segments enabled.  Nothing about the model needed to change.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 EPOCHS=25
 COMMON="data.source=transfuser model.aux.bev_classes=3 train.epochs=$EPOCHS"
 
