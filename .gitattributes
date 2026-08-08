@@ -1,0 +1,6 @@
+# Shell scripts are executed on a Linux server. Git's autocrlf turns their line
+# endings into CRLF in the working tree on Windows, and scp copies them across
+# verbatim -- where bash reads `set -u\r` as an invalid option and every
+# function definition as a syntax error. The failure appears only on the server,
+# and only after the file has been edited from Windows.
+*.sh text eol=lf
