@@ -176,6 +176,11 @@ class EGCAAgent(AutonomousAgent):
         for gnss, opt in plan:
             x, y = self._latlon_to_xy(gnss["lat"], gnss["lon"])
             sparse.append((x, y, COMMAND_MAP.get(str(opt).split(".")[-1], 3)))
+        # The densified plan drives the local geometry; the sparse vertices are
+        # kept because the navigation goal is defined on them, not on a fixed
+        # arc length along the dense one.
+        self.sparse_xy = sparse
+        self.sparse_idx = 0
         self.plan_xy = self._densify(sparse)
         self.plan_cum = [0.0]
         for i in range(len(self.plan_xy) - 1):
@@ -257,17 +262,29 @@ class EGCAAgent(AutonomousAgent):
                             ego_xy, compass)
 
     def _goal_and_command(self, ego_xy, compass, speed):
-        """Mirrors PrivilegedExpert.sparse_goal / .nav_command: same look-ahead,
-        same speed-scaled announcement window, same fallback."""
-        goal = self._point_at(GOAL_DISTANCE, ego_xy, compass)
-        horizon = max(8.0, 2.0 * speed)
-        i = self.idx
-        while (i + 1 < len(self.plan_xy)
-               and self.plan_cum[i] - self.plan_cum[self.idx] < horizon):
-            if self.plan_xy[i][2] != 3:          # a turn is coming up
-                return goal, self.plan_xy[i][2]
+        """The next vertex of the *sparse* route, in the ego frame, with its
+        navigation command -- which is what `x_command`/`y_command` mean in the
+        dataset this model is trained on.
+
+        Their expert takes `command_route[1]`, the next node of the undensified
+        route, so the goal sits wherever the planner happened to put that
+        vertex: a measured mean of 23.1 m over their data, ranging from 9.6 to
+        59.5 m. Feeding a fixed 8 m look-ahead instead -- which is what the
+        expert behind our own collection used, and what this method used to
+        mirror -- hands the network a goal three times nearer than anything it
+        was trained to read, on every frame of every route.
+        """
+        i = self.sparse_idx
+        while i + 1 < len(self.sparse_xy):
+            x, y = self._to_ego(self.sparse_xy[i][0], self.sparse_xy[i][1],
+                                ego_xy, compass)
+            if x > 1.0:                      # the first vertex still ahead
+                break
             i += 1
-        return goal, self.plan_xy[min(i, len(self.plan_xy) - 1)][2]
+        self.sparse_idx = i
+        goal = self._to_ego(self.sparse_xy[i][0], self.sparse_xy[i][1],
+                            ego_xy, compass)
+        return goal, self.sparse_xy[i][2]
 
     # ------------------------------------------------------------------- step
     def run_step(self, input_data, timestamp):

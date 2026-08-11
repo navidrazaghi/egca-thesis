@@ -39,6 +39,17 @@ export ROUTES6=$LEADERBOARD_ROOT/data/longest6
 : "${EVALUATOR:=$LEADERBOARD_ROOT/leaderboard/leaderboard_evaluator_local.py}"
 export EVALUATOR
 
+# The Longest6 chain reads DATAGEN and crashes on its first import without it.
+# It is not a debug flag: it selects the traffic density. At DATAGEN=1 the
+# scenario spawns a town-specific count for data collection -- 130 vehicles in
+# Town01, 120 in Town05, 190 in Town04. At 0, which is what their own
+# local_evaluation.sh sets, it spawns 500, "use all spawn points". The stock
+# evaluator only ever does the former, which is the three-to-fourfold difference
+# in traffic that made this project's autopilot validation come out at RC 87.94
+# against their published 82.71.
+: "${DATAGEN:=0}"
+export DATAGEN
+
 # `leaderboard_agent.py` is loaded by the evaluator as a standalone module from
 # its path, so it has no parent package and must import `egca.*` absolutely --
 # hence $EGCA_ROOT on the path.  $CARLA_ROOT/carla/agents is needed because the

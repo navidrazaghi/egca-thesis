@@ -91,7 +91,9 @@ def check(name, overrides, base_config, device, batch):
     print(f"  {model.num_parameters() / 1e6:.2f} M params, amp={amp}")
 
     losses = []
-    for it in range(2):
+    # Enough iterations that at least two survive the scaler's early skips.
+    ITERS = 6
+    for it in range(ITERS):
         model.train()
         with torch.autocast(device_type=device.type, enabled=amp):
             out = model(batch)
@@ -111,12 +113,24 @@ def check(name, overrides, base_config, device, batch):
                 print(f"  FAIL: {len(missing)} parameters never used, e.g. "
                       + ", ".join(missing[:3]))
                 ok = False
+        before = scaler.get_scale()
         scaler.step(opt)
         scaler.update()
-        losses.append(float(loss))
+        # A GradScaler starts at 65536 and halves on overflow, skipping that
+        # step entirely -- normal, self-correcting, and on the first iteration
+        # of a fresh model it happens most of the time. Comparing two losses
+        # across a skipped step compares a model with itself, which made this
+        # check report "loss did not change" on roughly half of its runs and
+        # taught nobody anything except to distrust it. Only steps the scaler
+        # actually applied are counted.
+        if scaler.get_scale() >= before:
+            losses.append(float(loss))
 
     print("  loss terms: " + ", ".join(f"{k}={v:.3f}" for k, v in parts.items()))
-    if losses[0] == losses[1]:
+    if len(losses) < 2:
+        print(f"  FAIL: the scaler skipped every step in {ITERS} iterations")
+        ok = False
+    elif losses[0] == losses[-1]:
         print("  FAIL: loss did not change after an optimiser step")
         ok = False
 

@@ -7,10 +7,25 @@ import math
 import numpy as np
 
 CAMERAS = [
-    # name, yaw (deg); each camera: 60 deg FOV, 256x160, cropped/stitched
-    ("cam_left", -55.0), ("cam_front", 0.0), ("cam_right", 55.0),
+    # name, yaw (deg). At +-60 with a 60 deg FOV the three frusta tile exactly:
+    # no overlap to crop and, more importantly, no gap. This is the rig that
+    # produced the published dataset the model is trained on, and the agent has
+    # to present the same geometry at inference or the network sees a projection
+    # it has never been shown.
+    #
+    # It was +-55 to match the collection rig of our own dataset, which leaves a
+    # 5 deg overlap on each side. The stitcher cropped that overlap and, in
+    # doing so, tore two 13 deg holes out of the panorama -- the strip ran
+    # [-85,-37], [-24,+24], [+37,+85] rather than a continuous 132 deg. A model
+    # trained on their seamless strip and driven with that one is being fed a
+    # different scene.
+    ("cam_left", -60.0), ("cam_front", 0.0), ("cam_right", 60.0),
 ]
 CAM_W, CAM_H, CAM_FOV = 320, 160, 60
+# The three cameras concatenate to 960 px spanning 180 deg; the model consumes
+# the central 704, which is 132 deg. Measured seams at columns 319 and 639 of
+# the published images confirm they are a plain concatenation, not a blend.
+FULL_W = 3 * CAM_W
 STITCH_W = 704
 
 
@@ -63,14 +78,20 @@ def spawn_rig(world, vehicle, callback, with_depth=False):
 
 
 def stitch_cameras(images):
-    """images: dict name -> H x W x 3 uint8. Crop overlap and stitch to
-    704 x 160 (132 deg total field of view)."""
-    crop = (3 * CAM_W - STITCH_W) // 4        # symmetric overlap crop
-    left = images["cam_left"][:, : CAM_W - crop]
-    front = images["cam_front"][:, crop // 2: CAM_W - crop + crop // 2]
-    right = images["cam_right"][:, crop:]
-    strip = np.concatenate([left, front, right], axis=1)
-    return strip[:, :STITCH_W]
+    """images: dict name -> H x W x 3 uint8. Concatenate the three 60 deg views
+    into a 960 px, 180 deg panorama and return its central 704 px (132 deg).
+
+    This is exactly what the training pipeline sees: the published dataset
+    stores the 960 px concatenation, and the adapter centre-crops it to 704.
+    Doing anything else here -- cropping overlaps, taking the first 704 of a
+    768 px strip -- moves the forward axis off the image centre and changes
+    which angle each column represents, which the network has no way to report
+    and every reason to be broken by.
+    """
+    strip = np.concatenate([images["cam_left"], images["cam_front"],
+                            images["cam_right"]], axis=1)
+    x0 = (FULL_W - STITCH_W) // 2
+    return strip[:, x0:x0 + STITCH_W]
 
 
 def carla_image_to_array(image):

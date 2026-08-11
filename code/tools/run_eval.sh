@@ -43,6 +43,12 @@ CKPT_DIR=${4:?checkpoint dir}
 : "${LIDAR_DROP_RATE:=0.0}"
 : "${DEBUG_DIR:=}"
 : "${MAX_ATTEMPTS:=12}"
+# Which file inside CKPT_DIR to drive with.  best.pth is selected on the
+# uncertainty-weighted total, not on waypoint error, and the two disagree: for
+# tf_query best.pth is epoch 13 at 0.064 m while the run ended at epoch 24 with
+# 0.051 m, so driving best.pth would evaluate a model a quarter worse than the
+# one that was trained.  Overridable until the selection criterion is fixed.
+: "${CKPT_FILE:=best.pth}"
 : "${SERVER_TIMEOUT:=600}"
 
 : "${LEADERBOARD_ROOT:?source tools/eval_env.sh first}"
@@ -70,11 +76,11 @@ fi
 
 # ---- agent config ----------------------------------------------------------
 python - "$CONF" "$CKPT_DIR" "$SEED" "$DROP_SENSOR" "$LIDAR_DROP_RATE" \
-         "$DEBUG_DIR" <<'PY'
+         "$DEBUG_DIR" "$CKPT_FILE" <<'PY'
 import json, sys
-conf, ckpt, seed, drop, rate, debug = sys.argv[1:7]
+conf, ckpt, seed, drop, rate, debug, ckpt_file = sys.argv[1:8]
 json.dump({"config": "configs/egca.yaml",
-           "checkpoint": f"checkpoints/{ckpt}/best.pth",
+           "checkpoint": f"checkpoints/{ckpt}/{ckpt_file}",
            "drop_sensor": drop or None,
            "lidar_drop_rate": float(rate),
            "seed": int(seed),

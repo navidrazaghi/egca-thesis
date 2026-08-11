@@ -28,8 +28,20 @@ cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
 source tools/eval_env.sh
 ICD=/usr/share/vulkan/icd.d/nvidia_icd.json
 SPLIT="$ROUTES6/longest6_split"
-OUT="$HOME/thesis/code/results/autopilot_val"
-AGENT="$HOME/transfuser/team_code_autopilot/autopilot.py"
+# Defaults drive the reference expert.  The same sharding, retry and
+# scored-record logic is what a policy evaluation needs, and run_eval.sh cannot
+# provide it: it hands all 36 routes to one evaluator call, which at the ~73
+# minutes per route measured here is 44 hours in a single slot against 11 across
+# four.  Overriding these three variables points the identical machinery at our
+# own agent.
+: "${OUT:=$HOME/thesis/code/results/autopilot_val}"
+: "${AGENT:=$HOME/transfuser/team_code_autopilot/autopilot.py}"
+: "${AGENT_CONFIG:=}"
+: "${TRACK:=MAP}"
+# Container names are derived from the output directory so a policy run and the
+# expert run can be told apart, and so a stale container from one never gets
+# removed by the other.
+TAG=$(basename "$OUT" | tr -c "a-zA-Z0-9" "-")
 # Routes are handed to slots by `route % SLOTS`, so the divisor also decides how
 # a partial re-run spreads.  The six routes lost to slot 0's dead simulator are
 # all multiples of 4 and would queue up behind each other again at SLOTS=4;
@@ -63,8 +75,8 @@ boot () {
         echo "[dry] boot carla on port $port"
         return 0
     fi
-    docker rm -f "carla-ap-$port" >/dev/null 2>&1
-    docker run -d --name "carla-ap-$port" --gpus all --net=host \
+    docker rm -f "carla-$TAG-$port" >/dev/null 2>&1
+    docker run -d --name "carla-$TAG-$port" --gpus all --net=host \
         -e NVIDIA_DRIVER_CAPABILITIES=all -v $ICD:$ICD:ro \
         carlasim/carla:0.9.14 /bin/bash CarlaUE4.sh -RenderOffScreen -nosound \
         -quality-level=Epic -carla-rpc-port=$port >/dev/null
@@ -124,9 +136,10 @@ run_slot () {
                 --routes="$SPLIT/longest_weathers_$r.xml" \
                 --scenarios="$ROUTES6/eval_scenarios.json" \
                 --agent="$AGENT" \
+                ${AGENT_CONFIG:+--agent-config="$AGENT_CONFIG"} \
                 --checkpoint="$OUT/route_$r.json" \
-                --track=MAP --port="$port" --trafficManagerPort="$tm" \
-                > "$HOME/logs/ap_route_$r.log" 2>&1
+                --track="$TRACK" --port="$port" --trafficManagerPort="$tm" \
+                > "$HOME/logs/$(basename "$OUT")_route_$r.log" 2>&1
             rc=$?
             scored "$OUT/route_$r.json" && break
             echo "$(date +%T) [s$slot] route $r UNSCORED (exit $rc)"
@@ -134,7 +147,7 @@ run_slot () {
             [ "$try" = 1 ] && { boot "$port" || return 1; }
         done
     done
-    [ "$DRY_RUN" = 0 ] && docker rm -f "carla-ap-$port" >/dev/null 2>&1
+    [ "$DRY_RUN" = 0 ] && docker rm -f "carla-$TAG-$port" >/dev/null 2>&1
     echo "$(date +%T) [s$slot] finished"
 }
 
@@ -145,10 +158,10 @@ done
 wait
 
 echo "ALLDONE"
-python - <<'PYEOF'
-import glob, json, statistics
+python - "$OUT" <<'PYEOF'
+import glob, json, statistics, sys
 ds, rc, pen, n, bad = [], [], [], 0, 0
-for f in sorted(glob.glob("results/autopilot_val/route_*.json")):
+for f in sorted(glob.glob(sys.argv[1] + "/route_*.json")):
     try:
         recs = json.load(open(f))["_checkpoint"].get("records", [])
     except Exception:

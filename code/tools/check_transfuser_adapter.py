@@ -102,6 +102,37 @@ def main():
         print("   FAIL: the vertical axis looks inverted -- most of the world "
               "should be below a roof-mounted sensor"); ok = False
 
+    # Where the ego vehicle blocks its own LiDAR. This is the check that was
+    # missing: the original version tested the axes and the sign conventions but
+    # nothing that could see a translation, so a 2.6 m displacement of every
+    # cloud passed it and only surfaced as bad closed-loop driving after two
+    # full training runs. The car cannot see through itself, so the gap in the
+    # returns directly along its own axis is a physical landmark at a known
+    # place -- the origin, since our frame is the ego origin.
+    los, his = [], []
+    for i in idx[:60]:
+        route, fid = ds.frames[int(i)]
+        p = load_lidar(os.path.join(route, "lidar", fid + ".npy"))
+        near = p[(np.abs(p[:, 1]) < 0.8) & (p[:, 2] < -0.5) & (np.abs(p[:, 0]) < 12)]
+        if len(near) < 40:
+            continue
+        xs = np.sort(near[:, 0])
+        gaps = np.diff(xs)
+        j = int(np.argmax(gaps))
+        if gaps[j] > 1.0:
+            los.append(xs[j]); his.append(xs[j + 1])
+    if los:
+        lo, hi = float(np.median(los)), float(np.median(his))
+        centre = (lo + hi) / 2
+        print(f"6. the ego vehicle's own shadow spans {lo:+.2f} m to {hi:+.2f} m, "
+              f"centred at {centre:+.2f} m")
+        if abs(centre) > 1.0:
+            print("   FAIL: the cloud is translated -- the sensor offset is "
+                  "being applied with the wrong sign or magnitude")
+            ok = False
+    else:
+        print("6. no ego shadow found; cannot check the translation")
+
     # ---- 6: shapes the model actually consumes -----------------------------
     s = ds[int(idx[0])]
     T = cfg.model.decoder.horizon

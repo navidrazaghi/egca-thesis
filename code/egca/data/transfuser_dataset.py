@@ -123,10 +123,19 @@ def load_lidar(path):
     """Their .npy is an object array; the point cloud is its second element."""
     raw = np.load(path, allow_pickle=True)
     pts = np.asarray(raw[1] if raw.dtype == object else raw, dtype=np.float32)
-    # Their sensor sits at x=1.3 with a -90 deg yaw; ours is the LiDAR origin
-    # with x forward and y left, which is the frame `pillarize` crops in.
+    # Their sensor sits at x=1.3 with a -90 deg yaw; ours is mounted at the ego
+    # origin with x forward and y left, which is the frame `pillarize` crops in.
+    #
+    # The offset is added, not subtracted. A point 8.7 m ahead of their sensor is
+    # 10.0 m ahead of the ego origin, so moving into our frame means +1.3.
+    # Subtracting instead displaced every cloud by 2.6 m, which nothing in
+    # training could reveal -- inputs and targets were shifted together, so the
+    # model simply learned the shifted world and reached 0.051 m open-loop --
+    # and which broke the moment the agent fed it a real, unshifted cloud in
+    # CARLA. The measurement that settles it is the hole the ego vehicle carves
+    # in its own returns: at -1.3 it sits at -2.57 m, at +1.3 at 0.03 m.
     out = np.empty_like(pts)
-    out[:, 0] = -pts[:, 1] - 1.3
+    out[:, 0] = -pts[:, 1] + 1.3
     out[:, 1] = -pts[:, 0]
     out[:, 2] = pts[:, 2]
     out[:, 3] = pts[:, 3]
