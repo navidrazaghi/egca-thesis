@@ -66,9 +66,17 @@ train:
   weight_decay: 1.0e-4
   warmup_epochs: 2
   sensor_dropout: 0.15            # rho (ablation switch: 0.0)
-  # Mirror the whole sample about the ego's forward axis.  Exact for this rig
-  # (equal-FOV cameras at -55/0/+55), so it doubles the effective dataset rather
-  # than approximating it; see dataset._mirror.  Set 0.0 to disable.
+  # Mirror the whole sample about the ego's forward axis -- image, cloud, both
+  # rasters, waypoints, goal and the left/right command together; see
+  # dataset._mirror.  Exact for this rig, so it doubles the effective dataset
+  # rather than approximating it.
+  #
+  # It applies to `data.source: own` only.  The TransFuser adapter takes the
+  # photometric jitter and the LiDAR jitter but not the mirror, so this value is
+  # inert when training on that set.  Left that way deliberately: mirroring it
+  # correctly means flipping six fields in a new code path, and the runs this
+  # thesis reports were trained without it, so turning it on now would change
+  # the training distribution without any measurement of what it did.
   flip_prob: 0.5
   amp: true
   num_workers: 24
