@@ -172,6 +172,10 @@ class TransfuserDataset(Dataset):
     spans eight towns, which makes a held-out town the honest choice.
     """
 
+    # CarlaDrivingDataset._mirror is borrowed unbound, and it reads this off
+    # `self`, so the adapter has to carry it too.
+    FLIP_COMMAND = {0: 1, 1: 0, 2: 2, 3: 3}
+
     def __init__(self, cfg, root, towns, augment=False, split="train"):
         self.cfg = cfg
         self.augment = augment
@@ -263,10 +267,37 @@ class TransfuserDataset(Dataset):
         pts = load_lidar(os.path.join(route, "lidar", fid + ".npy"))
         command = COMMAND_MAP.get(int(meas["command"]), 3)
 
+        # The auxiliary rasters are decoded before augmentation, not after,
+        # because the mirror has to reflect every field of the sample at once.
+        # Reflecting the image and the cloud while leaving the map and the
+        # trajectory alone would be worse than not augmenting at all.
+        seg = decode_topdown(
+            os.path.join(route, "topdown", "encoded_" + fid + ".png"),
+            self.seg_hw, self.cfg.model.lidar) \
+            if self.cfg.model.aux.bev_seg else None
+        dep = decode_depth(os.path.join(route, "depth", fid + ".png"),
+                           self.depth_hw, self.img_hw[1]) \
+            if self.cfg.model.aux.depth else None
+
         if self.augment:
             from .dataset import CarlaDrivingDataset
             img = CarlaDrivingDataset._augment_img(self, img)
             pts = CarlaDrivingDataset._augment_lidar(self, pts)
+            # This rig is symmetric about the ego's forward axis -- equal-FOV
+            # cameras at -60/0/+60 tiling without overlap -- so the reflection
+            # is an exact sample rather than an approximation, and it doubles
+            # the set that was the binding constraint in the first place.
+            if np.random.rand() < float(getattr(self.cfg.train, "flip_prob", 0.0)):
+                blank_seg = np.zeros(self.seg_hw, dtype=np.int64)
+                blank_dep = np.zeros(self.depth_hw, dtype=np.float32)
+                (img, pts, s2, d2, wp, goal,
+                 command) = CarlaDrivingDataset._mirror(
+                    self, img, pts,
+                    blank_seg if seg is None else seg,
+                    blank_dep if dep is None else dep,
+                    wp, goal, command)
+                seg = None if seg is None else s2
+                dep = None if dep is None else d2
 
         img = (img / 255.0 - np.array([0.485, 0.456, 0.406])) \
             / np.array([0.229, 0.224, 0.225])
@@ -276,16 +307,12 @@ class TransfuserDataset(Dataset):
             "pillar_feats": feats, "pillar_coords": coords, "pillar_mask": mask,
             "speed": torch.tensor([speed], dtype=torch.float32),
             "command": torch.tensor(command, dtype=torch.long),
-            "goal": torch.from_numpy(goal.astype(np.float32)),
-            "waypoints": torch.from_numpy(wp.astype(np.float32)),
+            "goal": torch.from_numpy(np.asarray(goal, dtype=np.float32)),
+            "waypoints": torch.from_numpy(np.asarray(wp, dtype=np.float32)),
         }
-        if self.cfg.model.aux.bev_seg:
-            seg = decode_topdown(
-                os.path.join(route, "topdown", "encoded_" + fid + ".png"),
-                self.seg_hw, self.cfg.model.lidar)
-            out["bev_seg"] = torch.from_numpy(seg)
-        if self.cfg.model.aux.depth:
-            dep = decode_depth(os.path.join(route, "depth", fid + ".png"),
-                               self.depth_hw, self.img_hw[1])
-            out["depth"] = torch.from_numpy(dep).unsqueeze(0)
+        if seg is not None:
+            out["bev_seg"] = torch.from_numpy(np.ascontiguousarray(seg))
+        if dep is not None:
+            out["depth"] = torch.from_numpy(
+                np.ascontiguousarray(dep)).unsqueeze(0)
         return out

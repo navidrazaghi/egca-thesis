@@ -271,9 +271,17 @@ def main():
         # `best` is updated before the checkpoint is built, not after: a resumed
         # run that carried a stale `best` would let the next epoch overwrite
         # best.pth with a worse model than the one already on disk.
-        improved = va_stats["total"] < best
+        # Selection is on the validation waypoint error, not on the weighted
+        # total. The total carries the auxiliary losses and the learned
+        # log-variance terms, so a model can lower it by growing confident
+        # without predicting a better trajectory -- and it did: on tf_query the
+        # total picked epoch 13 at 0.064 m while the run ended at epoch 24 with
+        # 0.051 m, a quarter worse in the only quantity the controller reads.
+        # The auxiliary heads exist to shape the representation; they are not
+        # the objective and should not decide which weights are kept.
+        improved = va_stats["wp"] < best
         if improved:
-            best = va_stats["total"]
+            best = va_stats["wp"]
         ckpt = {"model": model.state_dict(), "criterion": criterion.state_dict(),
                 "cfg": dict(cfg), "epoch": epoch,
                 "optimizer": optimizer.state_dict(),

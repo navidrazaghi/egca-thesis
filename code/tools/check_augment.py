@@ -36,13 +36,29 @@ def bev_cells(pts, n):
     return np.clip(row, 0, n - 1), np.clip(col, 0, n - 1)
 
 
-def alignment(pts, seg):
+def alignment(pts, seg, ground_only=False):
     """Fraction of occupied-cell mass that has LiDAR support.
 
     Scale-free and symmetric enough that the only thing it responds to is a
     geometric disagreement between the cloud and the raster.
+
+    `ground_only` switches the signal for rasters that carry no agents: the
+    published set stores three classes -- free, road, lane -- so there is no
+    occupied mass to correlate.
+
+    Drivable area against ground returns was tried first and has no power here:
+    on a straight road both are a symmetric band about the forward axis, so
+    mirroring one, both or neither scores the same to within noise (0.489
+    against 0.511). The discriminating quantity has to be asymmetric, which is
+    why the caller uses road_bias below instead.
     """
     n = seg.shape[0]
+    if ground_only:
+        row, col = bev_cells(pts[(pts[:, 2] < -1.8) & (pts[:, 2] > -2.6)], n)
+        if len(row) < 200:
+            return None
+        road = (seg == 1)
+        return float(road[row, col].sum()) / float(len(row))
     row, col = bev_cells(pts, n)
     hit = np.zeros_like(seg, dtype=bool)
     hit[row, col] = True
@@ -52,18 +68,53 @@ def alignment(pts, seg):
     return float((occ & hit).sum()) / float(occ.sum())
 
 
+def road_bias(seg, wp):
+    """Signed agreement between where the road leads and where the route goes.
+
+    Both are asymmetric about the forward axis whenever the vehicle is not on a
+    straight, and both must flip together under a reflection. The product is
+    positive when the drivable area leans the same way as the trajectory, so a
+    sample mirrored consistently keeps its sign and one mirrored in only half
+    its fields inverts it.
+    """
+    road = (seg == 1)
+    if road.sum() < 50:
+        return None
+    n = seg.shape[0]
+    cols = np.arange(n)[None, :]
+    centroid = float((road * cols).sum() / road.sum()) / (n - 1) - 0.5
+    lateral = float(wp[-1][1])
+    if abs(lateral) < 0.5:            # straight: carries no side information
+        return None
+    return centroid * lateral
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/egca.yaml")
     ap.add_argument("--frames", type=int, default=40)
+    ap.add_argument("--source", default="own", choices=("own", "transfuser"),
+                    help="which dataset's samples to mirror")
+    ap.add_argument("--root", default="~/transfuser/data")
     a = ap.parse_args()
 
     from egca.config import load_config
     from egca.data.dataset import CarlaDrivingDataset
 
-    cfg = load_config(a.config, [])
-    ds = CarlaDrivingDataset(cfg, cfg.data.towns_train, augment=False,
-                             split="train")
+    # The mirror is exact only if the rig is symmetric about the forward axis
+    # and every field is reflected together. Both datasets now feed the same
+    # `_mirror`, so both have to be shown to survive it -- the adapter was
+    # excluded from this check for as long as it did not call the mirror at all.
+    if a.source == "transfuser":
+        import os
+        from egca.data.transfuser_dataset import TransfuserDataset
+        cfg = load_config(a.config, ["model.aux.bev_classes=3"])
+        ds = TransfuserDataset(cfg, os.path.expanduser(a.root),
+                               ["Town01", "Town03"], augment=False, split="val")
+    else:
+        cfg = load_config(a.config, [])
+        ds = CarlaDrivingDataset(cfg, cfg.data.towns_train, augment=False,
+                                 split="train")
     if len(ds) == 0:
         sys.exit("no frames found")
 
@@ -73,24 +124,57 @@ def main():
     cmd_ok = True
 
     for i in idx:
-        img, pts, meas, seg, depth = ds._load(int(i))
-        wp = np.asarray(meas["waypoints"], dtype=np.float32)
-        goal = np.array([meas["goal_x"], meas["goal_y"]], dtype=np.float32)
-        cmd = int(meas["command"])
+        if a.source == "transfuser":
+            import os
+            from egca.data.transfuser_dataset import (load_lidar,
+                                                      decode_topdown,
+                                                      decode_depth,
+                                                      COMMAND_MAP)
+            route, fid = ds.frames[int(i)]
+            pose = ds._pose(int(i))
+            if pose is None:
+                continue
+            meas, wp, goal, _ = pose
+            wp = np.asarray(wp, dtype=np.float32)
+            goal = np.asarray(goal, dtype=np.float32)
+            cmd = COMMAND_MAP.get(int(meas["command"]), 3)
+            img = ds._image(route, fid)
+            pts = load_lidar(os.path.join(route, "lidar", fid + ".npy"))
+            seg = decode_topdown(os.path.join(route, "topdown",
+                                              "encoded_" + fid + ".png"),
+                                 ds.seg_hw, cfg.model.lidar)
+            depth = decode_depth(os.path.join(route, "depth", fid + ".png"),
+                                 ds.depth_hw, ds.img_hw[1])
+        else:
+            img, pts, meas, seg, depth = ds._load(int(i))
+            wp = np.asarray(meas["waypoints"], dtype=np.float32)
+            goal = np.array([meas["goal_x"], meas["goal_y"]], dtype=np.float32)
+            cmd = int(meas["command"])
 
-        base = alignment(pts, seg)
+        g_only = (a.source == "transfuser")
+        if g_only:
+            base = road_bias(seg, wp)
+        else:
+            base = alignment(pts, seg, g_only)
         if base is None:
             continue
 
-        mi, mp, ms, md, mw, mg, mc = ds._mirror(img, pts, seg, depth, wp, goal,
-                                                cmd)
-        same.append(alignment(mp, ms))
-        # deliberately wrong: mirror the cloud but not the raster
-        wrong_axis.append(alignment(mp, seg))
+        mi, mp, ms, md, mw, mg, mc = CarlaDrivingDataset._mirror(
+            ds, img, pts, seg, depth, wp, goal, cmd)
+        if g_only:
+            # a consistently mirrored sample keeps the sign; mirroring the
+            # trajectory but not the raster inverts it
+            same.append(road_bias(ms, mw) * np.sign(base))
+            wrong_axis.append(road_bias(seg, mw) * np.sign(base))
+        else:
+            same.append(alignment(mp, ms, g_only))
+            # deliberately wrong: mirror the cloud but not the raster
+            wrong_axis.append(alignment(mp, seg, g_only))
         n_scored += 1
 
         # mirroring twice must return the original sample exactly
-        ri, rp, rs, rd, rw, rg, rc = ds._mirror(mi, mp, ms, md, mw, mg, mc)
+        ri, rp, rs, rd, rw, rg, rc = CarlaDrivingDataset._mirror(
+            ds, mi, mp, ms, md, mw, mg, mc)
         if not (np.array_equal(ri, img) and np.allclose(rp, pts)
                 and np.array_equal(rs, seg) and np.array_equal(rd, depth)
                 and np.allclose(rw, wp) and np.allclose(rg, goal)):
