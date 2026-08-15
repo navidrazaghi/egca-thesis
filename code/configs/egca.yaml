@@ -114,6 +114,13 @@ data:
   # comparison in Chapter 5 a measurement rather than a citation.
   source: own
   transfuser_root: ~/transfuser/data
+  # Rebuild the waypoint target from the pose the car actually reached rather
+  # than the block stored with the frame.  See transfuser_dataset.__init__ for
+  # the measurement; in short the stored labels are right to 0.080 m while the
+  # car moves and wrong by 5.6x on exactly the frames where it pulls away from a
+  # standstill, which is the closed-loop failure.  False reproduces the runs
+  # trained before this was found.
+  tf_relabel: true
   tf_towns_val: [Town05]
   tf_towns_all: [Town01, Town02, Town03, Town04, Town05, Town06, Town07, Town10HD]
   # Evenly spaced subset of the held-out town used for per-epoch validation.

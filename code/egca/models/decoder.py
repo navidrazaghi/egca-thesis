@@ -70,6 +70,12 @@ class MeasurementEncoder(nn.Module):
         # value substituted for the speed reading when it is withheld; the
         # companion flag tells the network which of the two it is looking at
         self.absent_speed = nn.Parameter(torch.zeros(1))
+        # Withhold the reading at inference too, on every sample. Training with
+        # dropout leaves the network with two usable strategies -- read the
+        # sensors, or echo the speedometer -- and it takes the second whenever
+        # the reading is there. Setting this at deployment removes the choice
+        # without retraining anything.
+        self.force_absent = False
 
     def forward(self, speed, command):
         """speed: B x 1 (m/s), command: B (long) -> B x d."""
@@ -78,7 +84,10 @@ class MeasurementEncoder(nn.Module):
         onehot.scatter_(1, command.long().unsqueeze(1), 1.0)
         v = speed / 12.0
         known = torch.ones_like(v)
-        if self.training and self.speed_dropout > 0.0:
+        if self.force_absent:
+            v = self.absent_speed.expand_as(v)
+            known = torch.zeros_like(known)
+        elif self.training and self.speed_dropout > 0.0:
             drop = (torch.rand_like(v) < self.speed_dropout)
             v = torch.where(drop, self.absent_speed.expand_as(v), v)
             known = torch.where(drop, torch.zeros_like(known), known)

@@ -98,6 +98,24 @@ run () {
 run tf_base
 run tf_query  model.decoder.readout=query model.fusion.goal_injection=fusion
 
+# The same architecture on repaired labels.  `data.tf_relabel` rebuilds the
+# waypoint target from the pose the car actually reached: the stored block is
+# right to 0.080 m while the car moves and short by 5.6x on the frames where it
+# pulls away from a standstill, which is what taught the policy to creep and is
+# the closed-loop failure.  See transfuser_dataset.__init__.
+#
+# speed_dropout=0.0 so exactly one thing differs from tf_base_NO_SPEED_DROPOUT,
+# which was trained with the same parity fixes and the same schedule.  The
+# dropout treatment was measured against this failure and did not work -- 0.85
+# reliance to 0.76 over a full run -- so carrying it here would change two things
+# at once and buy nothing.
+run tf_base_rl  model.decoder.speed_dropout=0.0
+
+# tf_query_rl is deliberately not queued behind it.  A rung is about 20.5 h and
+# the closed-loop evaluation that answers whether relabelling worked needs the
+# same GPU, so queueing the ablation first would delay the answer by a day to
+# produce a second model built on an assumption not yet tested.
+
 # tf_regnet is deliberately not run here.  Each rung is about 22 h -- the loader
 # is bound by random reads over 234 GB against 88 GB of page cache, not by the
 # GPU -- and the two rungs above are the ones Chapter 5 cannot be written
@@ -110,7 +128,7 @@ run tf_query  model.decoder.readout=query model.fusion.goal_injection=fusion
 
 echo "LADDER_TF_DONE"
 printf '%-12s %9s %11s\n' run best_val final_train
-for n in tf_base tf_query; do
+for n in tf_base_NO_SPEED_DROPOUT tf_base tf_query tf_base_rl; do
     f="$HOME/logs/train_$n.log"
     [ -f "$f" ] || continue
     b=$(grep -o "val -\?[0-9.]* (wp [0-9.]* m)" "$f" | grep -o "wp [0-9.]*" \

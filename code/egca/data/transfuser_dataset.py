@@ -198,6 +198,73 @@ class TransfuserDataset(Dataset):
             raise RuntimeError(
                 f"no frames for towns {sorted(wanted)} under {root!r}")
 
+        # Rebuild the trajectory target from the pose the car actually reached
+        # instead of the one stored with the frame.  The stored block agrees
+        # with reality to 0.080 m while the car is moving and disagrees by a
+        # factor of 5.6 on the frames where it pulls away from a standstill: on
+        # 126 measured pull-aways the label says 0.82 m of travel over two
+        # seconds and the car covered 4.56 m.  Across Town05, 14.1% of stopped
+        # frames are pull-aways and only 10% of those carry a label that shows
+        # any motion at all.
+        #
+        # A network fitted to that learns "when stopped, creep", reproduces it
+        # to 0.056 m open-loop, and then sits still on the road -- which is the
+        # 0.30 m/s it predicts at zero speed and the DS 11.56.  Open loop looked
+        # healthy because it was scored against the same wrong target.
+        #
+        # Relabelling is all frames or none.  Switching definition by speed
+        # would put a discontinuity at the threshold and leave two different
+        # meanings of "waypoint" in one training set; the realized pose is one
+        # definition and it is the one the closed-loop metric rewards.
+        self.relabel = bool(getattr(cfg.data, "tf_relabel", True))
+        self._pose_xy = None
+        if self.relabel:
+            self._build_pose_index(root, towns)
+
+    def _build_pose_index(self, root, towns):
+        """Per-frame (x, y) and the last index of each frame's route.
+
+        Read once here rather than four extra JSON opens per sample: the loader
+        already runs at 80 samples/s and five reads where there was one would
+        show up as throughput.  Cached to disk because this is a fixed function
+        of the dataset, and a 258k-frame scan is minutes that every run would
+        otherwise repeat.
+        """
+        key = "%s_%d" % ("-".join(sorted(towns)), len(self.frames))
+        cache = os.path.join(root, ".egca_poses_%s.npz" % key)
+        if os.path.exists(cache):
+            try:
+                z = np.load(cache)
+                if len(z["xy"]) == len(self.frames):
+                    self._pose_xy, self._route_end = z["xy"], z["end"]
+                    return
+            except Exception:
+                pass                      # a corrupt cache is rebuilt, not fatal
+
+        xy = np.full((len(self.frames), 2), np.nan, dtype=np.float64)
+        for i, (route, fid) in enumerate(self.frames):
+            try:
+                with open(os.path.join(route, "measurements",
+                                       fid + ".json")) as f:
+                    m = json.load(f)
+                xy[i] = (m["x"], m["y"])
+            except Exception:
+                pass                      # stays NaN and is rejected in _pose
+
+        # frames.sort() puts one route's frames in one contiguous block, so the
+        # route boundary is where the directory changes
+        end = np.empty(len(self.frames), dtype=np.int64)
+        start = 0
+        for i in range(1, len(self.frames) + 1):
+            if i == len(self.frames) or self.frames[i][0] != self.frames[start][0]:
+                end[start:i] = i - 1
+                start = i
+        self._pose_xy, self._route_end = xy, end
+        try:
+            np.savez(cache, xy=xy, end=end)
+        except Exception:
+            pass                          # read-only dataset root is fine
+
     def __len__(self):
         return len(self.frames)
 
@@ -224,13 +291,28 @@ class TransfuserDataset(Dataset):
         if not np.isfinite(theta):               # the IMU occasionally returns NaN
             theta = 0.0
 
-        wp_world = np.asarray(meas["waypoints"], dtype=np.float64)
-        wp_world = wp_world[:, :2] if wp_world.size else np.zeros((0, 2))
-        wp = to_ego(wp_world, ego, theta)[:self.horizon]
-        if len(wp) == 0:                         # no future recorded at all
-            return None
-        if len(wp) < self.horizon:               # end of route: hold the last pose
-            wp = np.vstack([wp, np.repeat(wp[-1:], self.horizon - len(wp), 0)])
+        if self.relabel:
+            # The next `horizon` frames of this route are its future, at the
+            # measured 0.5 s stride -- the same spacing the stored block uses.
+            last = int(self._route_end[idx])
+            if idx + self.horizon > last:
+                # No future to read. Padding by holding the last pose is what
+                # produced a standstill target here, so the frame is refused and
+                # __getitem__ walks back to one that has a real future.
+                return None
+            wp_world = self._pose_xy[idx + 1:idx + 1 + self.horizon]
+            if not np.isfinite(wp_world).all():
+                return None
+            wp = to_ego(wp_world, ego, theta)
+        else:
+            wp_world = np.asarray(meas["waypoints"], dtype=np.float64)
+            wp_world = wp_world[:, :2] if wp_world.size else np.zeros((0, 2))
+            wp = to_ego(wp_world, ego, theta)[:self.horizon]
+            if len(wp) == 0:                     # no future recorded at all
+                return None
+            if len(wp) < self.horizon:           # end of route: hold last pose
+                wp = np.vstack([wp,
+                                np.repeat(wp[-1:], self.horizon - len(wp), 0)])
 
         goal = to_ego(np.array([meas["x_command"], meas["y_command"]]),
                       ego, theta)
