@@ -64,7 +64,8 @@ class EGCAPolicy(nn.Module):
         # fusion token, "fusion" removes it from the GRU so the goal reaches the
         # policy through perception alone.
         self.goal_injection = getattr(m.fusion, "goal_injection", "decoder")
-        self.measure = MeasurementEncoder(d)
+        self.measure = MeasurementEncoder(
+            d, speed_dropout=float(getattr(m.decoder, "speed_dropout", 0.0)))
         # "query" reads the fused tokens with learned planning queries; "pooled"
         # is the original mean-pool into a GRU.  Decision-level fusion decodes
         # each modality separately and so has no single fused token set to read,

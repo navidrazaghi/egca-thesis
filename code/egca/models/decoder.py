@@ -41,19 +41,45 @@ class WaypointDecoder(nn.Module):
 
 
 class MeasurementEncoder(nn.Module):
-    """Ego-state + navigation command encoder, Eq. (4.3)."""
+    """Ego-state + navigation command encoder, Eq. (4.3).
+
+    The speed input is withheld on a fraction of training samples. The reason is
+    measured rather than assumed: a policy trained with it always present learns
+    that the strongest predictor of the next speed is the current one, which is
+    true in the data -- roughly a third of frames are stationary and almost all
+    of those are followed by another stationary frame -- and self-sustaining on
+    the road. Traced over three Longest6 routes, the resulting agent braked on
+    89% of frames and predicted a two-second reach of 0.76 m, so it never left a
+    standstill and the route timed out.
+
+    Withholding is not the same as passing zero. Zero is a legitimate reading
+    that means "stopped", and substituting it would teach the network that
+    stopped and unknown are the same state -- the exact confusion being removed.
+    A learned token stands in instead, the same device the absent-modality
+    mechanism uses.
+    """
 
     NUM_COMMANDS = 4    # left, right, straight, follow-lane
 
-    def __init__(self, embed_dim=256):
+    def __init__(self, embed_dim=256, speed_dropout=0.0):
         super().__init__()
+        self.speed_dropout = float(speed_dropout)
         self.mlp = nn.Sequential(
-            nn.Linear(1 + self.NUM_COMMANDS, 128), nn.ReLU(inplace=True),
+            nn.Linear(1 + self.NUM_COMMANDS + 1, 128), nn.ReLU(inplace=True),
             nn.Linear(128, embed_dim))
+        # value substituted for the speed reading when it is withheld; the
+        # companion flag tells the network which of the two it is looking at
+        self.absent_speed = nn.Parameter(torch.zeros(1))
 
     def forward(self, speed, command):
         """speed: B x 1 (m/s), command: B (long) -> B x d."""
         onehot = torch.zeros(speed.shape[0], self.NUM_COMMANDS,
                              device=speed.device)
         onehot.scatter_(1, command.long().unsqueeze(1), 1.0)
-        return self.mlp(torch.cat([speed / 12.0, onehot], dim=-1))
+        v = speed / 12.0
+        known = torch.ones_like(v)
+        if self.training and self.speed_dropout > 0.0:
+            drop = (torch.rand_like(v) < self.speed_dropout)
+            v = torch.where(drop, self.absent_speed.expand_as(v), v)
+            known = torch.where(drop, torch.zeros_like(known), known)
+        return self.mlp(torch.cat([v, onehot, known], dim=-1))

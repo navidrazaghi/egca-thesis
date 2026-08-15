@@ -47,6 +47,12 @@ TAG=$(basename "$OUT" | tr -c "a-zA-Z0-9" "-")
 # all multiples of 4 and would queue up behind each other again at SLOTS=4;
 # SLOTS=3 puts two in each slot instead.  Overridable for exactly that reason.
 : "${SLOTS:=4}"
+# Port bases, overridable because this machine is shared and another evaluation
+# may already hold the default range. A simulator that cannot bind its port
+# fails the whole slot, and the slot's routes are then skipped -- which is how
+# six routes were lost silently once before.
+: "${PORT_BASE:=2000}"
+: "${TM_BASE:=8100}"
 mkdir -p "$OUT"
 
 # DRY_RUN=1 walks the whole control flow without a simulator or a GPU: every
@@ -74,6 +80,13 @@ boot () {
     if [ "$DRY_RUN" = 1 ]; then
         echo "[dry] boot carla on port $port"
         return 0
+    fi
+    # Refuse a port somebody else is already serving. Docker will happily start
+    # a container that cannot bind, and the slot then spends its whole run
+    # talking to a simulator that is not ours -- or to nothing at all.
+    if python -c "import socket,sys; s=socket.socket(); sys.exit(0 if s.connect_ex(('127.0.0.1',$port))==0 else 1)" 2>/dev/null; then
+        echo "$(date +%T) port $port is already in use; set PORT_BASE to a free range"
+        return 1
     fi
     docker rm -f "carla-$TAG-$port" >/dev/null 2>&1
     docker run -d --name "carla-$TAG-$port" --gpus all --net=host \
@@ -112,8 +125,8 @@ run_slot () {
     # on the first attempt and cost a three-hour GPU window, and `bash -n`
     # cannot see it because the expansion only happens at run time.
     local slot=$1
-    local port=$((2000 + slot * 10))
-    local tm=$((8100 + slot * 10))
+    local port=$((PORT_BASE + slot * 10))
+    local tm=$((TM_BASE + slot * 10))
     local r
     local try
     local rc

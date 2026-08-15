@@ -39,6 +39,14 @@ model:
     # lets learned planning queries read the fused tokens directly and adds a
     # target-speed head, removing the spatial bottleneck before the trajectory.
     readout: pooled
+    # Fraction of training samples for which the speedometer is withheld and a
+    # learned "unknown" token stands in.  Measured on the run trained without
+    # it: holding the scene fixed and sweeping the speed input from 0 to 6 m/s
+    # swings the predicted target speed by 5.13 m/s, a dependence of 0.85 -- the
+    # network reads the speedometer and barely consults the sensors.  That is an
+    # excellent predictor on recorded data, where the next speed really is close
+    # to the current one, and a self-sustaining standstill on the road.
+    speed_dropout: 0.5
     query_layers: 3
     speed_bins: [0.0, 2.0, 4.0, 6.0, 8.0]
   aux:
