@@ -101,7 +101,14 @@ class EGCAAgent(AutonomousAgent):
                     else load_config(_rel(conf["config"]),
                                      conf.get("overrides") or []))
         self.model = EGCAPolicy(self.cfg, sensor_dropout=0.0).to(self.device).eval()
-        self.model.load_state_dict(ckpt["model"])
+        # Checkpoints predating speed dropout have a 5-input measurement encoder
+        # against today's 6. That is every ablation, which are precisely the runs
+        # the internal comparison needs, and without the migration each one dies
+        # here -- inside an agent the evaluator will happily score as 36 failed
+        # routes rather than as a crash. strict=True so a genuine mismatch still
+        # stops rather than driving with half the weights initialised at random.
+        self.model.load_state_dict(
+            EGCAPolicy.upgrade_state_dict(ckpt["model"]), strict=True)
         # Controller settings come from the checkpoint like everything else, but
         # unlike the architecture they are not fixed by the weights: creeping and
         # the PID gains can be changed without retraining, and the whole point of
