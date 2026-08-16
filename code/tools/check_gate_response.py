@@ -60,7 +60,14 @@ def main():
             rng.normal(0.0, 40.0, size=tuple(img.shape)).astype(np.float32))
         return (img + noise.to(img.device)).clamp(0.0, 255.0)
 
-    kinds = ["clean", "dark", "noisy"]
+    # "absent" is the one condition these runs were actually trained on: sensor
+    # dropout removes a whole modality and substitutes the learned absent token.
+    # Including it separates two very different claims -- that the gate tracks
+    # sensor *quality*, which is what chapter 5 asserted, and that it tracks
+    # sensor *presence*, which is what the training signal taught. Without this
+    # row a flat response to degradation reads as "the gate does nothing", which
+    # would be the wrong conclusion.
+    kinds = ["clean", "dark", "noisy", "cam absent", "lidar absent"]
     gate = {k: [] for k in kinds}
     rng = np.random.default_rng(0)
     with torch.no_grad():
@@ -69,8 +76,14 @@ def main():
             base = collate(chunk)
             for k in kinds:
                 b = {n: t.cuda() for n, t in base.items()}
-                b["image"] = degrade(b["image"], k, rng)
-                g = model(b)["gate"]
+                drop = None
+                if k == "cam absent":
+                    drop = "cam"
+                elif k == "lidar absent":
+                    drop = "lidar"
+                else:
+                    b["image"] = degrade(b["image"], k, rng)
+                g = model(b, force_drop=drop)["gate"]
                 if g is None:
                     print("this configuration has no gate; nothing to report")
                     return
