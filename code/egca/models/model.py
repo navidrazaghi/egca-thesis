@@ -211,3 +211,29 @@ class EGCAPolicy(nn.Module):
 
     def num_parameters(self):
         return sum(p.numel() for p in self.parameters())
+
+    @staticmethod
+    def upgrade_state_dict(sd):
+        """Load a checkpoint trained before the measurement encoder grew.
+
+        Speed dropout added a "reading present" flag to the measurement input
+        and a learned token to stand in when it is withheld, taking the first
+        linear from 5 inputs to 6. Every run trained before that -- all eleven
+        ablations -- then fails to load, and retraining them is not something a
+        deadline absorbs.
+
+        The migration is exact rather than approximate. Appending a zero column
+        for the flag means it contributes nothing to the pre-activation, and
+        `absent_speed` is never read when speed_dropout is 0, so the upgraded
+        network computes the identical function on every input. This is a
+        loading shim, not a change to what those runs measured.
+        """
+        w = sd.get("measure.mlp.0.weight")
+        if w is None or w.shape[1] != 5:
+            return sd
+        sd = dict(sd)
+        pad = torch.zeros(w.shape[0], 1, dtype=w.dtype, device=w.device)
+        sd["measure.mlp.0.weight"] = torch.cat([w, pad], dim=1)
+        sd["measure.absent_speed"] = torch.zeros(1, dtype=w.dtype,
+                                                 device=w.device)
+        return sd
