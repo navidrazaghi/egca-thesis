@@ -71,6 +71,29 @@ def main():
               % (key, len(v), v[:, 0].mean(), v[:, 1].mean()))
     print("\n  frames refused for having no future in their route: %d" % refused)
 
+    # train.py caps validation by replacing dataset.frames after construction.
+    # Anything that resolves a frame by its position in that list silently
+    # points at the wrong future once it is subsampled, and the result looks
+    # like a number rather than like an error: validation sat at a constant
+    # 159.56 m for eleven hours while the training curve fell normally. So the
+    # subsampling is reproduced here rather than trusted.
+    sub = TransfuserDataset(load_config(a.config, ["data.tf_relabel=true"]),
+                            root, [a.town], augment=False, split="val")
+    stride = len(sub.frames) / 800.0
+    keep = [sub.frames[int(i * stride)] for i in range(800)]
+    orig = {f: new._pose(i) for i, f in enumerate(new.frames)
+            if f in set(keep)}
+    sub.frames = keep
+    moved = bad = 0
+    for i, f in enumerate(sub.frames):
+        before, after = orig.get(f), sub._pose(i)
+        if before is None or after is None:
+            continue
+        moved += 1
+        if not np.allclose(before[1], after[1], atol=1e-6):
+            bad += 1
+    print("\n  after subsampling, targets that changed: %d of %d" % (bad, moved))
+
     mv = np.array(rows["moving"]) if rows["moving"] else np.zeros((0, 2))
     pa = np.array(rows["pull-away"]) if rows["pull-away"] else np.zeros((0, 2))
     ok = True
@@ -81,6 +104,11 @@ def main():
     if len(mv) and abs(mv[:, 1].mean() - mv[:, 0].mean()) > 0.5:
         print("\nFAIL: moving targets moved by more than 0.5 m -- the stored "
               "block was already right there, so this is a new error, not a fix")
+        ok = False
+    if bad:
+        print("\nFAIL: %d targets changed when the frame list was subsampled -- "
+              "frames are being resolved by position, and validation will score "
+              "against the future of some other frame" % bad)
         ok = False
     if ok:
         print("\nPASS: the standstill frames carry the travel that happened and "

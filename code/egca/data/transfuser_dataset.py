@@ -33,6 +33,7 @@ model uses x forward and y left, hence the sign flips in `to_ego`. Getting this
 wrong trains the network on a mirrored world, and nothing in the loss would
 report it.
 """
+import bisect
 import glob
 import json
 import os
@@ -230,6 +231,15 @@ class TransfuserDataset(Dataset):
         of the dataset, and a 258k-frame scan is minutes that every run would
         otherwise repeat.
         """
+        # Keep the full ordering. Callers subsample `self.frames` after the
+        # dataset is built -- train.py caps validation at val_max_frames by
+        # replacing the list -- and a position in the subsampled list is not a
+        # position in this index. Looked up positionally, the target became the
+        # offset between two unrelated frames and validation reported a constant
+        # 159.56 m while training error fell normally. Frames are resolved by
+        # (route, fid) through this list instead, which no amount of
+        # subsampling can invalidate.
+        self._all_frames = list(self.frames)
         key = "%s_%d" % ("-".join(sorted(towns)), len(self.frames))
         cache = os.path.join(root, ".egca_poses_%s.npz" % key)
         if os.path.exists(cache):
@@ -294,16 +304,29 @@ class TransfuserDataset(Dataset):
         if self.relabel:
             # The next `horizon` frames of this route are its future, at the
             # measured 0.5 s stride -- the same spacing the stored block uses.
-            last = int(self._route_end[idx])
-            if idx + self.horizon > last:
+            j = bisect.bisect_left(self._all_frames, (route, fid))
+            if (j >= len(self._all_frames)
+                    or self._all_frames[j] != (route, fid)):
+                return None
+            if j + self.horizon > int(self._route_end[j]):
                 # No future to read. Padding by holding the last pose is what
                 # produced a standstill target here, so the frame is refused and
                 # __getitem__ walks back to one that has a real future.
                 return None
-            wp_world = self._pose_xy[idx + 1:idx + 1 + self.horizon]
+            wp_world = self._pose_xy[j + 1:j + 1 + self.horizon]
             if not np.isfinite(wp_world).all():
                 return None
             wp = to_ego(wp_world, ego, theta)
+            # 25 m in 0.5 s is 180 km/h, which this expert never drives, so a
+            # step that large means the target is not this frame's future. The
+            # positional-index bug produced exactly that and nothing rejected
+            # it: validation reported a constant 159.56 m for eleven hours
+            # while the training curve looked perfectly healthy. Refusing the
+            # frame turns any future variant of the same mistake into missing
+            # data, which is visible, instead of a plausible-looking number.
+            if float(np.abs(np.diff(np.vstack([[0.0, 0.0], wp]), axis=0)
+                            ).sum(axis=1).max()) > 25.0:
+                return None
         else:
             wp_world = np.asarray(meas["waypoints"], dtype=np.float64)
             wp_world = wp_world[:, :2] if wp_world.size else np.zeros((0, 2))
