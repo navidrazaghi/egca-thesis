@@ -109,7 +109,9 @@ os.makedirs("configs/agent", exist_ok=True)
 # What matters for the internal comparison is that the setting is identical
 # across all four runs, not that it is absent from all four.
 CONTROL = {"control_hz": 20.0, "creep_after_s": 55.0, "creep_for_s": 1.5,
-           "creep_speed": 4.0, "max_throttle": 0.75, "brake_speed_ratio": 1.05,
+           "creep_speed": 4.0,
+           "unstick_after_s": 4.0, "unstick_for_s": 1.2, "unstick_speed": 2.0,
+           "max_throttle": 0.75, "brake_speed_ratio": 1.05,
            "clip_delta": 0.25,
            "lateral": {"kp": 1.25, "ki": 0.75, "kd": 0.30, "window": 20},
            "longitudinal": {"kp": 5.0, "ki": 0.5, "kd": 1.0, "window": 20}}

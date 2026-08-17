@@ -154,7 +154,7 @@ def run_route(world, model, ctrl, route_id, start_idx, end_idx, drop_sensor,
         with torch.no_grad():
             out = model(batch, force_drop=force)
         wps = out["waypoints"][0].cpu().numpy()
-        steer, throttle, brake = ctrl.step(wps, speed)
+        steer, throttle, brake, _ = ctrl.step(wps, speed)
         vehicle.apply_control(carla.VehicleControl(
             throttle=throttle, steer=steer, brake=brake))
         sensor_data.clear()

@@ -338,8 +338,9 @@ class EGCAAgent(AutonomousAgent):
         veh_ahead = d_veh is not None and d_veh < self.BRAKE_DIST_M
         if veh_ahead:
             hazard = True                    # also holds the creep nudge back
-        steer, throttle, brake = self.ctrl.step(
-            wps, speed, hazard=hazard, v_des=0.0 if veh_ahead else v_des)
+        steer, throttle, brake, reverse = self.ctrl.step(
+            wps, speed, hazard=hazard, v_des=0.0 if veh_ahead else v_des,
+            rear_clear=self._rear_clear(lidar))
         if self.debug_dir:
             self._trace(batch, wps, speed, command, goal, out,
                         steer, throttle, brake, hazard)
@@ -347,7 +348,7 @@ class EGCAAgent(AutonomousAgent):
                 self._dump_debug(strip, wps, speed, command, goal, out)
         self.step_i += 1
         return carla.VehicleControl(steer=float(steer), throttle=float(throttle),
-                                    brake=float(brake))
+                                    brake=float(brake), reverse=bool(reverse))
 
     # --------------------------------------------------------------- helpers
     def _build_image(self, input_data):
@@ -457,6 +458,27 @@ class EGCAAgent(AutonomousAgent):
              & (lidar[:, 1] > y0) & (lidar[:, 1] < y1)
              & (lidar[:, 2] > z0) & (lidar[:, 2] < z1))
         return bool(m.sum() >= min_points)
+
+    # Mirror of HAZARD_BOX behind the car, over the distance one reverse nudge
+    # covers: 2 m/s for 1.2 s is 2.4 m, plus the rear overhang and a margin.
+    REAR_BOX = (-6.0, -1.0, -1.2, 1.2, -1.8, 1.0)
+
+    def _rear_clear(self, lidar, min_points=8):
+        """Is there room to reverse?
+
+        Reversing out of a wedge is only worth doing when nothing is behind:
+        backing into a following car turns one blocked route into a collision,
+        and the evaluator charges 0.60 for a vehicle against the 0.65 already
+        paid for whatever the car is leaning on. The LiDAR is a full 360 sweep,
+        so the check costs nothing beyond the mask.
+        """
+        if lidar is None or len(lidar) == 0:
+            return False        # no evidence of clearance is not clearance
+        x0, x1, y0, y1, z0, z1 = self.REAR_BOX
+        m = ((lidar[:, 0] > x0) & (lidar[:, 0] < x1)
+             & (lidar[:, 1] > y0) & (lidar[:, 1] < y1)
+             & (lidar[:, 2] > z0) & (lidar[:, 2] < z1))
+        return bool(m.sum() < min_points)
 
     def _trace(self, batch, wps, speed, command, goal, out, steer, throttle,
                brake, hazard=False):

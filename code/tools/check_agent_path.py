@@ -93,7 +93,7 @@ def main():
             print(f"{name:<14} FAIL: query readout emitted no speed_logits")
             ok = False
 
-        steer, throttle, brake = ctrl.step(wps, 4.0, hazard=False, v_des=v_des)
+        steer, throttle, brake, _ = ctrl.step(wps, 4.0, hazard=False, v_des=v_des)
         finite = all(np.isfinite([steer, throttle, brake]))
         in_range = (-1.0 <= steer <= 1.0 and 0.0 <= throttle <= 1.0
                     and 0.0 <= brake <= 1.0)

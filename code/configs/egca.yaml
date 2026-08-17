@@ -107,6 +107,18 @@ control:
   creep_after_s: 55.0
   creep_for_s: 1.5
   creep_speed: 4.0
+  # Reversing out of a wedge. 26 of 36 Longest6 routes ended "blocked", and the
+  # trace of one shows what that is: throttle held at 0.749 with the brake off
+  # and the speed at 0.00 for the 180 s the evaluator waits before ending the
+  # route. Creeping cannot help, since forward is the direction that is blocked.
+  #
+  # Sustained throttle with no motion is also what separates a wedge from
+  # waiting legitimately -- at a red light the controller commands brake, so the
+  # counter never starts. Verified on all four cases, including that it does not
+  # fire while driving or with anything behind the car.
+  unstick_after_s: 4.0
+  unstick_for_s: 1.2
+  unstick_speed: 2.0
 
 data:
   # own | transfuser.  "own" is the collected dataset below; "transfuser" reads

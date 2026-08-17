@@ -52,12 +52,54 @@ class WaypointController:
         self.creep_speed = float(getattr(ctrl_cfg, "creep_speed", 4.0))
         self.stuck_steps = 0
         self.creep_steps = 0
+        # Reversing out of a wedge. 26 of the 36 Longest6 routes ended
+        # "blocked", and the traces say what that is: the car touches something,
+        # leans on it, and the controller holds throttle at 0.749 with the brake
+        # off while the speed stays at 0.00 for the 180 s it takes the evaluator
+        # to end the route. Creeping cannot help -- it is already commanding
+        # forward, and forward is the direction that is blocked.
+        #
+        # The discriminator against waiting legitimately is in that same trace
+        # and needs no extra sensing: at a red light or in a queue the
+        # controller commands *brake*, and only a wedge produces sustained
+        # throttle with no motion.
+        self.unstick_after = int(float(
+            getattr(ctrl_cfg, "unstick_after_s", 4.0)) * hz)
+        self.unstick_for = int(float(
+            getattr(ctrl_cfg, "unstick_for_s", 1.2)) * hz)
+        self.unstick_speed = float(getattr(ctrl_cfg, "unstick_speed", 2.0))
+        self.push_steps = 0
+        self.unstick_steps = 0
+        self._last_throttle = 0.0
 
     def reset(self):
         self.turn.reset()
         self.speed.reset()
         self.stuck_steps = 0
         self.creep_steps = 0
+        self.push_steps = 0
+        self.unstick_steps = 0
+        self._last_throttle = 0.0
+
+    def _unsticking(self, speed, throttle, rear_clear):
+        """Whether to reverse this step, given the last commanded throttle.
+
+        Refuses when anything is behind: backing into a following car turns one
+        blocked route into a collision, and the evaluator charges 0.60 for it
+        against 0.65 for the static object already hit.
+        """
+        if self.unstick_steps > 0:
+            self.unstick_steps -= 1
+            return self.unstick_steps > 0 and rear_clear
+        if throttle > 0.3 and speed < 0.1:
+            self.push_steps += 1
+        else:
+            self.push_steps = 0
+        if self.push_steps >= self.unstick_after and rear_clear:
+            self.push_steps = 0
+            self.unstick_steps = self.unstick_for
+            return True
+        return False
 
     def _creeping(self, speed, hazard):
         """Decide whether to force the car forward this step.
@@ -81,7 +123,8 @@ class WaypointController:
             self.creep_steps = 0
         return True
 
-    def step(self, waypoints, speed, hazard=False, v_des=None):
+    def step(self, waypoints, speed, hazard=False, v_des=None,
+             rear_clear=False):
         """waypoints: T x 2 (x fwd, y left) in ego frame; speed in m/s.
 
         `v_des` overrides the speed implied by the waypoint spacing.  With the
@@ -104,6 +147,16 @@ class WaypointController:
             v_des = float(np.linalg.norm(wp[1] - wp[0]) / self.wp_dt)
         else:
             v_des = float(v_des)
+        # Reversing is decided before anything else, on the throttle the last
+        # step actually commanded, because it is a response to the car having
+        # failed to move under power rather than to anything in the scene.
+        if self._unsticking(speed, self._last_throttle, rear_clear):
+            self.turn.reset()
+            self.speed.reset()
+            self._last_throttle = 0.0
+            # Straight back and slow. Steering while reversing out of a wedge
+            # needs to know which side is fouled, which is not available here.
+            return 0.0, float(min(0.4, self.max_throttle)), 0.0, True
         if self._creeping(speed, hazard):
             # Override the network: it is predicting a standstill and has no way
             # out of it, because a standstill is what it was shown.
@@ -115,4 +168,5 @@ class WaypointController:
         throttle = float(np.clip(self.speed.step(delta), 0.0, self.max_throttle))
         if brake:
             throttle = 0.0
-        return steer, throttle, float(brake)
+        self._last_throttle = throttle
+        return steer, throttle, float(brake), False
