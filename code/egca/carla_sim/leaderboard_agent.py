@@ -321,11 +321,12 @@ class EGCAAgent(AutonomousAgent):
         if "speed_logits" in out:
             v_des = float(self.model.query_readout.expected_speed(
                 out["speed_logits"])[0])
+        hazard = self._hazard_ahead(lidar)
         steer, throttle, brake = self.ctrl.step(
-            wps, speed, hazard=self._hazard_ahead(lidar), v_des=v_des)
+            wps, speed, hazard=hazard, v_des=v_des)
         if self.debug_dir:
             self._trace(batch, wps, speed, command, goal, out,
-                        steer, throttle, brake)
+                        steer, throttle, brake, hazard)
             if self.step_i % 20 == 0:
                 self._dump_debug(strip, wps, speed, command, goal, out)
         self.step_i += 1
@@ -384,7 +385,7 @@ class EGCAAgent(AutonomousAgent):
         return bool(m.sum() >= min_points)
 
     def _trace(self, batch, wps, speed, command, goal, out, steer, throttle,
-               brake):
+               brake, hazard=False):
         """One JSONL record per frame, holding every quantity the network is fed.
 
         Two of the three defects found so far were train/eval input mismatches
@@ -414,6 +415,15 @@ class EGCAAgent(AutonomousAgent):
             "n_pillars": int(batch["pillar_mask"].shape[0]),
             "n_lidar_pts": int(batch["pillar_mask"].sum()),
             "route_idx": self.idx,
+            # Whether the creep interlock is holding the car. Without this the
+            # only way to tell a policy that will not start from a creep that is
+            # forbidden from firing is to run the route twice with creeping on
+            # and off and compare -- which was done, and gave byte-identical
+            # scores on two routes and a large swing on a third, explaining
+            # nothing. These two flags separate the cases in one run.
+            "hazard": bool(hazard),
+            "creeping": bool(self.ctrl.creep_steps > 0),
+            "stuck_steps": int(self.ctrl.stuck_steps),
         }
         with open(os.path.join(self.debug_dir, "trace.jsonl"), "a") as f:
             f.write(json.dumps(rec) + "\n")

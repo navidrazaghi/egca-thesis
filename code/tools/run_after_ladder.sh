@@ -17,6 +17,18 @@ set -u
 
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
 
+# This script runs python itself -- it writes each agent config -- and without
+# the environment there is no python on PATH. run_autopilot_val.sh sources this
+# too, but far too late: the config generation happens here, in this shell.
+#
+# The first run of this chain found out the expensive way. `python: command not
+# found` scrolled past, no agent config was ever written, the evaluator started
+# anyway against a path that did not exist, and all four runs "finished" in four
+# minutes each with 36 routes scored at DS 0.00 and penalty 1.00. That is not a
+# crash, it is a driving result, and it took fourteen hours to notice.
+source tools/eval_env.sh
+command -v python >/dev/null || { echo "no python after sourcing eval_env.sh"; exit 1; }
+
 EPOCHS=25
 : "${SLOTS:=4}"
 
@@ -82,12 +94,22 @@ os.makedirs("configs/agent", exist_ok=True)
 # difference to the fusion mechanism. The internal comparison is the only place
 # the central claim is testable, and that confound would quietly destroy it.
 #
-# Creeping is off. It was measured against the standstill and lost -- 21 paired
-# routes gave RC 18.6 against 20.7, because the hazard interlock correctly
-# refuses to creep into dense traffic -- and leaving it on would score the
-# heuristic rather than the policy, which is what this comparison is about.
-CONTROL = {"control_hz": 20.0, "creep_after_s": 1e9, "creep_for_s": 0.0,
-           "creep_speed": 0.0, "max_throttle": 0.75, "brake_speed_ratio": 1.05,
+# Creeping stays on, at the 55 s threshold. Turning it off to "measure the
+# policy rather than the heuristic" sounded principled and was wrong twice over.
+#
+# The DS 11.56 baseline this is compared against was measured with it, and every
+# published agent on this benchmark carries some equivalent -- so a number
+# produced without it is comparable to nothing, including our own earlier
+# measurement. And the blocked criterion is 180 s under 0.1 m/s, which creeping
+# at 55 s is precisely the mechanism for avoiding: without it any route the
+# policy fails to start from scores a clean zero. Six routes of the run that
+# proved this: three at RC 0.00 with no infraction at all, the car never having
+# left its start, against RC 33.47 on a route it did start.
+#
+# What matters for the internal comparison is that the setting is identical
+# across all four runs, not that it is absent from all four.
+CONTROL = {"control_hz": 20.0, "creep_after_s": 55.0, "creep_for_s": 1.5,
+           "creep_speed": 4.0, "max_throttle": 0.75, "brake_speed_ratio": 1.05,
            "clip_delta": 0.25,
            "lateral": {"kp": 1.25, "ki": 0.75, "kd": 0.30, "window": 20},
            "longitudinal": {"kp": 5.0, "ki": 0.5, "kd": 1.0, "window": 20}}
@@ -98,6 +120,34 @@ json.dump({"config": os.path.join(root, "configs/egca.yaml"),
            "seed": 0, "debug_dir": None},
           open("configs/agent/%s.json" % name, "w"), indent=2)
 PYEOF
+    # The config is what the whole run hangs on, so its absence stops the chain
+    # rather than starting an evaluator that will score 36 zeros against it.
+    local acfg="$HOME/thesis/code/configs/agent/$name.json"
+    if [ ! -s "$acfg" ]; then
+        echo "$(date +%F\ %T) $name: agent config was not written; stopping"
+        return 1
+    fi
+    # And the agent must actually build from it. Every failure this catches --
+    # a shape mismatch, a missing control key, an unreadable checkpoint -- is
+    # invisible once the evaluator owns the process, where it appears as routes
+    # that scored zero rather than as an error.
+    if ! python - "$acfg" <<'PYEOF'
+import json, sys, torch
+from egca.config import Cfg
+from egca.control.pid import WaypointController
+from egca.models import EGCAPolicy
+c = json.load(open(sys.argv[1]))
+ck = torch.load(c["checkpoint"], map_location="cpu", weights_only=False)
+cfg = Cfg(ck["cfg"])
+m = EGCAPolicy(cfg, sensor_dropout=0.0).eval()
+m.load_state_dict(EGCAPolicy.upgrade_state_dict(ck["model"]), strict=True)
+d = dict(cfg["control"]); d.update(c.get("control") or {})
+WaypointController(Cfg(d), cfg.model.decoder.wp_dt)
+PYEOF
+    then
+        echo "$(date +%F\ %T) $name: agent does not build from its config; stopping"
+        return 1
+    fi
     echo "$(date +%F\ %T) === evaluating $name ==="
     OUT="$out" \
     AGENT="$HOME/thesis/code/egca/carla_sim/leaderboard_agent.py" \
@@ -113,13 +163,26 @@ PYEOF
 # open-loop error does not separate the fusion strategies -- egca 0.135, concat
 # 0.137, late 0.135, all inside a 0.003 seed spread. An interrupted queue should
 # leave the earlier ones done.
-evaluate tf_base_rl last.pth 25
-evaluate concat  best.pth 20
-evaluate late    best.pth 20
-evaluate egca_s0 best.pth 20
+# EVAL_ONLY names a single run, for the case where a later rung has to be
+# evaluated on its own without re-driving the ones already scored -- eleven
+# hours each, so re-running them to reach the new one is not free.
+: "${EVAL_ONLY:=}"
+RUNS="tf_base_rl concat late egca_s0"
+if [ -n "$EVAL_ONLY" ]; then
+    RUNS="$EVAL_ONLY"
+    case "$EVAL_ONLY" in
+        tf_base_rl|tf_base_rl_veh) evaluate "$EVAL_ONLY" last.pth 25;;
+        *)                         evaluate "$EVAL_ONLY" best.pth 20;;
+    esac
+else
+    evaluate tf_base_rl last.pth 25
+    evaluate concat  best.pth 20
+    evaluate late    best.pth 20
+    evaluate egca_s0 best.pth 20
+fi
 
 echo "CHAIN_DONE"
-for n in tf_base_rl concat late egca_s0; do
+for n in $RUNS; do
     d="$HOME/thesis/code/results/eval_$n"
     [ -d "$d" ] || continue
     echo "--- $n"
@@ -142,6 +205,12 @@ if ds:
     print("  routes %d   DS %5.2f   RC %5.2f   IS %.3f" %
           (len(ds), m(ds), m(rc), m(pen)))
     print("  expert in this same chain: DS 64.03, RC 73.38, IS 0.884")
+    # An agent that never started scores every route at zero distance with no
+    # infractions to penalise, which arrives here as a clean DS 0.00 / RC 0.00 /
+    # IS 1.000 and reads like a result. Say plainly that it is not one.
+    if max(rc) == 0.0:
+        print("  NOT A RESULT: no route moved at all, which means the agent "
+              "never drove -- check the evaluation log for a startup failure")
 else:
     print("  nothing scored")
 PYEOF

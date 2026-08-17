@@ -66,15 +66,42 @@ TOPDOWN_PPM = 5        # their renderer's pixels per metre
 TOPDOWN_PX = 500       # and the size of the raster it writes
 
 
-def decode_topdown(path, out_hw, cfg_lidar):
-    """Their encoded BEV PNG -> our class raster (0 free, 1 road, 2 lane).
+def decode_topdown(path, out_hw, cfg_lidar, with_agents=True):
+    """Their encoded BEV PNG -> our class raster.
+
+    0 free, 1 road, 2 lane, and with `with_agents` also 3 vehicle, 4 pedestrian.
 
     The PNG packs fifteen binary layers into five bit-planes of three colour
-    channels; their own loader keeps channels 10 and 11, which are bit 7 and
-    bit 6 of the blue channel and carry drivable area and lane marking.  The
-    remaining layers describe agents and are read from `label_raw` instead, so
-    the raster here is the same three-class HD-map target their paper uses
-    rather than a partly-filled version of ours.
+    channels, and their own loader keeps only two of them. This read that as
+    "the rest is not here" and took the road and lane pair alone, leaving the
+    auxiliary head with a map of where the tarmac is and no notion that other
+    traffic exists. The policy trained on it collided with other vehicles 3.92
+    times per route over the 36 Longest6 routes -- the dominant failure by a
+    wide margin, ahead of layout collisions at 1.03.
+
+    The agents were in the same file the whole time. Their encoder documents the
+    packing exactly:
+
+        channels  0-4  -> plane 0   road, lane, lights
+        channels  5-9  -> plane 1   vehicle, pedestrian
+        channels 10-14 -> plane 2   future vehicles
+
+    and cv2 writes plane 0 to blue and plane 1 to green, so vehicles are bit 7
+    of the green channel. Their loader looks like it keeps planes 10-11 only
+    because it reads the PNG as RGB, where red and blue are swapped relative to
+    this one -- both end up with road and lane.
+
+    Occupancy over 120 frames confirms the reading before it is relied on: road
+    0.364, lane 0.045, lights 0.0001, vehicle 0.0038, pedestrian 0.0001. The
+    vehicle figure matches their 22x9 px vehicle template at 5 px/m over the
+    handful of cars inside a 100 x 100 m window.
+
+    Taking the agents from here rather than rasterising `label_raw` boxes also
+    avoids re-deriving a coordinate convention: this raster's geometry is
+    already established against the LiDAR, and three separate attempts to settle
+    the box convention statistically could not separate the candidates, because
+    the vehicles carrying enough returns to measure sit almost entirely straight
+    ahead where a lateral sign flip changes nothing.
     """
     img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if img is None:
@@ -85,6 +112,13 @@ def decode_topdown(path, out_hw, cfg_lidar):
     seg = np.zeros(blue.shape, dtype=np.int64)
     seg[road] = 1
     seg[lane] = 2                            # lane wins where both are set
+    if with_agents:
+        green = img[:, :, 1]
+        # Agents are painted over the surface they stand on: a car occupying a
+        # lane cell is a car, and labelling it lane would tell the network the
+        # cell is drivable.
+        seg[(green & (1 << 7)) > 0] = 3      # vehicle
+        seg[(green & (1 << 6)) > 0] = 4      # pedestrian
 
     # Their raster is 100 x 100 m at 5 px/m with the ego at the centre and
     # heading down the image, while this model's BEV grid is 32 m forward by
@@ -376,9 +410,15 @@ class TransfuserDataset(Dataset):
         # because the mirror has to reflect every field of the sample at once.
         # Reflecting the image and the cloud while leaving the map and the
         # trajectory alone would be worse than not augmenting at all.
+        # The agent classes are only emitted when the head has outputs for them.
+        # Writing class 3 into a target a 3-class head is trained against would
+        # be an out-of-range label, and the loss would either crash or, with
+        # ignore_index set, silently drop every vehicle cell -- which is the
+        # state this was already in, by a different route.
         seg = decode_topdown(
             os.path.join(route, "topdown", "encoded_" + fid + ".png"),
-            self.seg_hw, self.cfg.model.lidar) \
+            self.seg_hw, self.cfg.model.lidar,
+            with_agents=self.cfg.model.aux.bev_classes >= 5) \
             if self.cfg.model.aux.bev_seg else None
         dep = decode_depth(os.path.join(route, "depth", fid + ".png"),
                            self.depth_hw, self.img_hw[1]) \

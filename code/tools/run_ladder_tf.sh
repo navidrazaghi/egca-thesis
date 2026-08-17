@@ -111,6 +111,18 @@ run tf_query  model.decoder.readout=query model.fusion.goal_injection=fusion
 # at once and buy nothing.
 run tf_base_rl  model.decoder.speed_dropout=0.0
 
+# Same again with the agent layers of the auxiliary target switched on.
+#
+# tf_base_rl drives -- it completed two Longest6 routes outright and six above
+# 50% -- and then collides with other vehicles 3.92 times per route, against
+# 1.03 for layout. Nothing in its supervision ever said where other traffic is:
+# the auxiliary BEV target held road, lane and nothing else, while the vehicle
+# and pedestrian layers sat unread in the same PNG. See decode_topdown.
+#
+# bev_classes=5 rather than 6: this dataset's raster has no separate obstacle
+# class, and a sixth output would train against a label that never occurs.
+run tf_base_rl_veh  model.decoder.speed_dropout=0.0 model.aux.bev_classes=5
+
 # tf_query_rl is deliberately not queued behind it.  A rung is about 20.5 h and
 # the closed-loop evaluation that answers whether relabelling worked needs the
 # same GPU, so queueing the ablation first would delay the answer by a day to
