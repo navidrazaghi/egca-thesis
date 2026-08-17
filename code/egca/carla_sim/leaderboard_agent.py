@@ -109,6 +109,13 @@ class EGCAAgent(AutonomousAgent):
         # stops rather than driving with half the weights initialised at random.
         self.model.load_state_dict(
             EGCAPolicy.upgrade_state_dict(ckpt["model"]), strict=True)
+        # Only worth running the auxiliary head at inference when it was
+        # trained with an agent class; on a 3-class checkpoint it predicts road
+        # and lane, which the controller cannot brake on.
+        self.brake_on_bev = (bool(conf.get("brake_on_bev", True))
+                             and self.cfg.model.aux.bev_seg
+                             and self.cfg.model.aux.bev_classes >= 5)
+        self.model.aux_at_inference = self.brake_on_bev
         # Controller settings come from the checkpoint like everything else, but
         # unlike the architecture they are not fixed by the weights: creeping and
         # the PID gains can be changed without retraining, and the whole point of
@@ -322,8 +329,17 @@ class EGCAAgent(AutonomousAgent):
             v_des = float(self.model.query_readout.expected_speed(
                 out["speed_logits"])[0])
         hazard = self._hazard_ahead(lidar)
+        # Predicted traffic in the corridor overrides the trajectory. The
+        # waypoints are what the policy intends; this is what it sees, and when
+        # the two disagree about an occupied cell straight ahead the safe
+        # reading wins.
+        d_veh = (self._bev_vehicle_distance(out) if self.brake_on_bev
+                 else None)
+        veh_ahead = d_veh is not None and d_veh < self.BRAKE_DIST_M
+        if veh_ahead:
+            hazard = True                    # also holds the creep nudge back
         steer, throttle, brake = self.ctrl.step(
-            wps, speed, hazard=hazard, v_des=v_des)
+            wps, speed, hazard=hazard, v_des=0.0 if veh_ahead else v_des)
         if self.debug_dir:
             self._trace(batch, wps, speed, command, goal, out,
                         steer, throttle, brake, hazard)
@@ -363,9 +379,67 @@ class EGCAAgent(AutonomousAgent):
         }
         return {k: v.to(self.device) for k, v in batch.items()}
 
+    # Lane-width corridor searched in the predicted BEV, and the following
+    # distance under which the car gives way.
+    #
+    # The signal is the distance to the nearest predicted vehicle, not whether
+    # one is present. Presence does not discriminate: Longest6 runs 256 vehicles
+    # and something is in the corridor most of the time, so a binary rule brakes
+    # on 38% of the frames the expert drives straight through. Measured against
+    # the expert over 800 held-out frames, distance does:
+    #
+    #     nearer than  5 m -> fires on 36% of its stops,  1% of its driving
+    #     nearer than  7 m -> fires on 45% of its stops,  4% of its driving
+    #     nearer than 10 m -> fires on 50% of its stops, 29% of its driving
+    #
+    # 7 m is the knee. It catches under half of the expert's stops, which is
+    # expected -- the rest are red lights, which this cannot see -- so it is an
+    # additional layer under the policy, not a replacement for it.
+    BRAKE_CORRIDOR_M = (-1.4, 1.4)     # lateral half-width
+    BRAKE_SKIP_M = 4.0                 # the ego's own footprint in the raster
+    BRAKE_DIST_M = 7.0
+    BRAKE_ROW_CELLS = 2                # cells per row before a row counts
+    VEHICLE_CLASS = 3          # decode_topdown: 0 free 1 road 2 lane 3 vehicle
+
     # Box swept by the car during one creep nudge, plus a margin: 4 m/s for
     # 1.5 s is 6 m, and the ego is about 2 m wide.
     HAZARD_BOX = (1.0, 7.0, -1.2, 1.2, -1.8, 1.0)   # x0, x1, y0, y1, z0, z1
+
+    def _bev_vehicle_distance(self, out):
+        """Metres to the nearest predicted vehicle ahead, or None if no head.
+
+        The policy collided with other vehicles 3.92 times per route, and the
+        controller had nothing to brake on: its only hazard signal was a raw
+        LiDAR occupancy box, which fires on kerbs, walls and parked cars alike
+        and so had to be kept small enough to be nearly useless in traffic.
+        Once the auxiliary head is trained with an agent class it predicts the
+        one thing that matters here, and it comes free with the forward pass
+        the policy already runs.
+        """
+        seg = out.get("bev_seg")
+        if seg is None:
+            return None
+        cls = seg[0].argmax(0).cpu().numpy()          # H x W class map
+        h, w = cls.shape
+        x0, x1 = self.cfg.model.lidar.x_range
+        y0, y1 = self.cfg.model.lidar.y_range
+        b0, b1 = self.BRAKE_CORRIDOR_M
+        # Rows run from the far edge down to the ego, columns left to right --
+        # the arrangement decode_topdown produces and check_bev_alignment
+        # measured against the LiDAR.
+        c0 = int(round((b0 - y0) / (y1 - y0) * w))
+        c1 = int(round((b1 - y0) / (y1 - y0) * w))
+        c0, c1 = max(0, min(c0, w)), max(0, min(c1, w))
+        if c1 <= c0:
+            return None
+        rows = np.arange(h)
+        dist = x1 - (rows + 0.5) * (x1 - x0) / h      # metres ahead per row
+        occupied = ((cls[:, c0:c1] == self.VEHICLE_CLASS).sum(1)
+                    >= self.BRAKE_ROW_CELLS)
+        # Skip the ego's own footprint: the target paints agents over whatever
+        # they stand on, and the car itself reaches about 3 m past the sensor.
+        ahead = occupied & (dist > self.BRAKE_SKIP_M)
+        return float(dist[ahead].min()) if ahead.any() else float("inf")
 
     def _hazard_ahead(self, lidar, min_points=8):
         """Is something solid directly in front of the car?

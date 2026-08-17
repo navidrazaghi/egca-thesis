@@ -19,6 +19,9 @@ class EGCAPolicy(nn.Module):
     def __init__(self, cfg, sensor_dropout=0.15):
         super().__init__()
         self.cfg = cfg
+        # Set by the driving agent when it wants the auxiliary BEV prediction
+        # as a perception signal rather than as a training target.
+        self.aux_at_inference = False
         m = cfg.model
         d = m.embed_dim
         self.mode = getattr(m.fusion, "mode", "egca")
@@ -178,7 +181,12 @@ class EGCAPolicy(nn.Module):
         drop the supervision that TransFuser measured as worth 14 points of
         route completion when removed entirely.
         """
-        if not self.training or aux_tokens is None:
+        # The heads are training-only by default because they are 1.3 M
+        # parameters the policy does not need to drive. But the BEV head, once
+        # it has vehicle classes, predicts exactly the thing the controller has
+        # no other way to know -- where the other traffic is -- and running it
+        # at inference costs one convolution on tokens that already exist.
+        if aux_tokens is None or not (self.training or self.aux_at_inference):
             return
         aux_c, aux_l = aux_tokens
         if self.seg_head is not None and aux_l is not None:
