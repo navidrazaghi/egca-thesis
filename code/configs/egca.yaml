@@ -133,6 +133,13 @@ data:
   # standstill, which is the closed-loop failure.  False reproduces the runs
   # trained before this was found.
   tf_relabel: true
+  # Screening stride: keep every Nth frame of the published set. 1 is the full
+  # set and is what a reported result must use. 4 is the screening setting --
+  # about 51k training frames, a working set that stays in page cache, so the
+  # run is faster than the frame ratio alone suggests. Consecutive frames of one
+  # route are nearly identical, so this costs far less than dropping towns,
+  # which would also destroy the held-out-town split's meaning.
+  tf_frame_stride: 1
   tf_towns_val: [Town05]
   tf_towns_all: [Town01, Town02, Town03, Town04, Town05, Town06, Town07, Town10HD]
   # Evenly spaced subset of the held-out town used for per-epoch validation.

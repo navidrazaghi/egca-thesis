@@ -51,6 +51,19 @@ TAG=$(basename "$OUT" | tr -c "a-zA-Z0-9" "-")
 # may already hold the default range. A simulator that cannot bind its port
 # fails the whole slot, and the slot's routes are then skipped -- which is how
 # six routes were lost silently once before.
+# Which routes to drive. The full 36 is the only set comparable with published
+# Longest6 numbers and is what the reported result must use. A subset is for
+# screening: 11 h per evaluation is too expensive to ask whether an idea helps
+# at all, and the measured cost of a smaller sample is known -- over the 36
+# scored routes of one run the route-to-route spread is 6.25 DS, so 12 routes
+# estimate the mean to about +-2.4 at 90%. Large effects survive that; small
+# ones were never going to be visible in a thesis-sized budget anyway.
+#
+# Pairing does not rescue it. The route-level DS correlation between two
+# different runs is -0.09, because a route's score is decided by where the
+# policy happens to fail rather than by the route's difficulty, so scoring the
+# same routes for both arms buys nothing. Only the count helps.
+: "${ROUTE_IDS:=$(seq 0 35)}"
 : "${PORT_BASE:=2000}"
 : "${TM_BASE:=8100}"
 mkdir -p "$OUT"
@@ -113,7 +126,16 @@ scored () {
     python - "$1" <<'PYEOF' >/dev/null 2>&1
 import json, sys
 recs = json.load(open(sys.argv[1]))["_checkpoint"].get("records", [])
-sys.exit(0 if recs and "score_composed" in recs[0].get("scores", {}) else 1)
+if not recs or "score_composed" not in recs[0].get("scores", {}):
+    sys.exit(1)
+# A route the simulator dropped is not a driving result. On a shared card,
+# "A sensor took too long to send their data" is recorded as a completed route
+# with DS 0.00 and no infractions, which is indistinguishable from a policy that
+# never moved -- and it drags the mean down by a full route each time. Reject it
+# so the slot retries on a fresh simulator.
+if "crash" in recs[0].get("status", "").lower():
+    sys.exit(1)
+sys.exit(0)
 PYEOF
 }
 
@@ -131,7 +153,7 @@ run_slot () {
     local try
     local rc
     boot "$port" || return 1
-    for r in $(seq 0 35); do
+    for r in $ROUTE_IDS; do
         [ $((r % SLOTS)) -eq "$slot" ] || continue
         if scored "$OUT/route_$r.json"; then
             echo "$(date +%T) [s$slot] route $r done"; continue

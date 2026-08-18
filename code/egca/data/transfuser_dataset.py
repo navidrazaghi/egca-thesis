@@ -233,6 +233,23 @@ class TransfuserDataset(Dataset):
             raise RuntimeError(
                 f"no frames for towns {sorted(wanted)} under {root!r}")
 
+        # Screening stride. Closed-loop evaluation costs 11 h and training 21 h,
+        # which is too expensive to ask "does this idea help at all?" -- and most
+        # ideas are answered by a large effect on a smaller sample.
+        #
+        # Taking every Nth frame rather than dropping towns keeps the layout
+        # diversity that a held-out-town split is meant to test, and it also
+        # gets the I/O back: training here is bound by random reads over a 234 GB
+        # set against ~60 GB of page cache, so a quarter of the frames is a
+        # working set that stays cached after the first epoch, and the speedup is
+        # more than the ratio of frames.
+        #
+        # Consecutive frames of one route are nearly identical, so the frames
+        # dropped carry little the kept ones do not.
+        stride = int(getattr(cfg.data, "tf_frame_stride", 1) or 1)
+        if stride > 1:
+            self.frames = self.frames[::stride]
+
         # Rebuild the trajectory target from the pose the car actually reached
         # instead of the one stored with the frame.  The stored block agrees
         # with reality to 0.080 m while the car is moving and disagrees by a
