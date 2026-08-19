@@ -15,7 +15,16 @@
 # Note: this deliberately sends traffic to the server outside the VPN, using the
 # real IP of this machine.
 
-param([string]$Server = "213.233.184.253")
+# The address is not defaulted here: this file is public, and publishing the
+# address of a machine you hold an SSH session to invites scanning for no
+# benefit. Pass it, or set EGCA_SERVER once in your own environment.
+param([string]$Server = $env:EGCA_SERVER)
+
+if (-not $Server) {
+    Write-Host "Usage: fix_server_route.ps1 -Server <address>" -ForegroundColor Red
+    Write-Host "   or: set EGCA_SERVER once and run with no argument."
+    exit 1
+}
 
 $ErrorActionPreference = "Stop"
 
