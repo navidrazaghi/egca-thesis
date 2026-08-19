@@ -85,6 +85,35 @@ def front_matter(b):
     b.EMPTY("Title18C", 3)
     b.SECT()
 
+    # ---- draft notice, sharing the preface's section
+    #
+    # It cannot have a section of its own: the template defines a fixed
+    # number of section properties and b.SECT() walks that list, so an
+    # extra break runs it off the end.
+    #
+    # The document is public on the project repository while the closed-loop
+    # numbers are still being produced, and the comparison tables of chapter 5
+    # carry placeholders that a reader would otherwise take for results. The
+    # notice sits before the preface so that it is seen ahead of any figure,
+    # and it names the one number that has been measured so the gap is explicit
+    # rather than implied. Remove this section once the tables are filled.
+    b.PSTYLE("AbsTitleFarsi", "یادداشت نسخه پیش‌نویس")
+    b.P("این سند یک نسخه پیش‌نویس است و هنوز کامل نشده‌است. متن فصل‌ها نوشته و "
+        "بازبینی شده، اما بخشی از اعداد فصل پنجم — به‌ویژه جدول مقایسه با "
+        "روش‌های پیشرفته، جدول شرایط جوی و منحنی اختلال حسگر — هنوز حاصل "
+        "اجرای کامل ارزیابی حلقه‌بسته نیستند و به‌عنوان جای‌نگهدار در جدول‌ها "
+        "باقی مانده‌اند. این ارقام را نباید نتیجه این پژوهش تلقی کرد.")
+    b.P("آنچه تا این تاریخ واقعاً اندازه‌گیری شده‌است، در همان زنجیره ارزیابی و "
+        "روی سی‌وچهار مسیر محک Longest6، امتیاز رانندگی {$۴٫۱۰$} با نرخ تکمیل "
+        "مسیر {$۲۹٫۲۵$} و ضریب تخلفات {$۰٫۲۵۰$} است؛ عامل ممتاز مرجع در همان "
+        "زنجیره امتیاز {$۶۴٫۰۳$} می‌گیرد. سیاست آموخته‌شده رانندگی می‌کند — دو "
+        "مسیر را به‌طور کامل و شش مسیر را بیش از پنجاه درصد طی کرده — و شکست "
+        "غالب آن برخورد با خودروهای دیگر است.")
+    b.P("گزارش کامل اندازه‌گیری‌ها، به‌همراه ابزاری که هر عدد را تولید کرده‌است، "
+        "در پرونده docs/FINDINGS.md مخزن پروژه در دسترس است. نسخه نهایی این سند "
+        "پس از تکمیل ارزیابی‌ها منتشر خواهد شد و این یادداشت در آن حذف می‌شود.")
+    b.EMPTY()
+
     # ---- section 4: preface
     b.PSTYLE("AbsTitleFarsi", "پیشگفتار")
     b.P("رانندگی خودران در یک دهه اخیر از یک آرزوی دور به یکی از فعال‌ترین حوزه‌های "
