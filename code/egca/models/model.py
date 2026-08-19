@@ -148,16 +148,16 @@ class EGCAPolicy(nn.Module):
         # `ego_cond` enabled the fusion blocks are conditioned on it, so speed
         # and command reach perception instead of only the decoder.
         m = self.measure(batch["speed"], batch["command"])
-        z, gate, aux_tokens, fused, (zc, zl) = self.fusion(fc, fl,
-                                                           force_drop=force_drop,
-                                                           ego=m,
-                                                           goal=batch["goal"])
+        (z, gate, aux_tokens, fused, (zc, zl),
+         drop_masks) = self.fusion(fc, fl, force_drop=force_drop, ego=m,
+                                   goal=batch["goal"])
         if self.readout == "query":
             tc, tl = fused
             tokens = torch.cat([t for t in (tc, tl) if t is not None], dim=1)
             waypoints, speed_logits = self.query_readout(tokens, m)
             out = {"waypoints": waypoints, "gate": gate,
                    "speed_logits": speed_logits}
+            self._add_gate_supervision(out, drop_masks)
             self._add_aux(out, aux_tokens, depth_logits, lidar_hw, batch)
             return out
         if self.mode == "late":
@@ -170,8 +170,21 @@ class EGCAPolicy(nn.Module):
         else:
             waypoints = self.decoder(z, m, batch["goal"])
         out = {"waypoints": waypoints, "gate": gate}
+        self._add_gate_supervision(out, drop_masks)
         self._add_aux(out, aux_tokens, depth_logits, lidar_hw, batch)
         return out
+
+    def _add_gate_supervision(self, out, drop_masks):
+        """Expose which modality the sensor dropout removed this step.
+
+        Only when the gate actually decides anything (mode egca with the gate
+        on) and only in training: the loss turns these into a target for the
+        gate -- camera dropped means the camera weight should go to 0, LiDAR
+        dropped means 1. The masks are data for the loss, not gradients, and
+        outside training they would only clutter the agent's output dict.
+        """
+        if self.training and self.fusion.use_gate:
+            out["drop_cam"], out["drop_lidar"] = drop_masks
 
     def _add_aux(self, out, aux_tokens, depth_logits, lidar_hw, batch):
         """Attach the training-only auxiliary predictions.

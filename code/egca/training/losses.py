@@ -21,10 +21,17 @@ class UncertaintyWeightedLoss(nn.Module):
     # likelihood-term coefficient: 1/2 for Gaussian heads, 1 for the softmax head
     COEF = {"wp": 0.5, "depth": 0.5, "seg": 1.0, "speed": 1.0}
 
-    def __init__(self, use_seg=True, use_depth=True, wp_dt=0.5, speed_bins=None):
+    def __init__(self, use_seg=True, use_depth=True, wp_dt=0.5, speed_bins=None,
+                 gate_supervision=0.0):
         super().__init__()
         self.use_seg, self.use_depth = use_seg, use_depth
         self.wp_dt = wp_dt
+        # Fixed coefficient, deliberately outside the uncertainty weighting:
+        # the gate target is not a task with unknown noise, it is a calibration
+        # constraint whose scale is known (BCE, order 1), and letting a learned
+        # log-variance shrink it away would quietly reproduce the unsupervised
+        # gate that FINDINGS 4 measured as carrying no signal.
+        self.gate_coef = float(gate_supervision)
         # The target-speed head only exists with the query readout; its weight is
         # allocated either way so a checkpoint stays loadable across the switch.
         self.register_buffer(
@@ -58,5 +65,20 @@ class UncertaintyWeightedLoss(nn.Module):
         for k, l in losses.items():
             s = self.log_var[k]
             total = total + self.COEF[k] * torch.exp(-s) * l + 0.5 * s
+        # Gate supervision (FINDINGS 4). Sensor dropout already manufactures
+        # frames whose reliability is known by construction -- a dropped
+        # modality carries zero information -- so on exactly those frames the
+        # gate g (the *camera* weight in z = g z_c + (1-g) z_l) has a ground
+        # truth: 0 when the camera was dropped, 1 when the LiDAR was. Frames
+        # where nothing was dropped are left unsupervised; what the gate does
+        # between clean sensors remains the network's to learn.
+        if self.gate_coef > 0 and "drop_cam" in out:
+            dropped = out["drop_cam"] | out["drop_lidar"]
+            if bool(dropped.any()):
+                g = out["gate"][dropped].clamp(1e-4, 1.0 - 1e-4)
+                tgt = out["drop_lidar"][dropped].float()
+                gate_l = F.binary_cross_entropy(g, tgt)
+                losses["gate"] = gate_l
+                total = total + self.gate_coef * gate_l
         losses["total"] = total
         return total, {k: float(v.detach()) for k, v in losses.items()}

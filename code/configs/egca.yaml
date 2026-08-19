@@ -24,13 +24,38 @@ model:
     # decoder | both | fusion.  Where the navigation goal enters the policy.
     # "decoder" is the original: the goal is fed to the GRU at every step and
     # nowhere else, which is the late-conditioning bottleneck LEAD reports.
-    goal_injection: decoder
+    # "fusion" is required by readout: query -- with the GRU gone, the goal
+    # token is the only route the goal has into the policy.
+    goal_injection: fusion
     num_blocks: 4                 # L
     num_heads: 4                  # H
     ffn_dim: 512
     attention: linear             # linear | full  (ablation switch)
     gate: true                    # sensor-reliability gate (ablation switch)
     gate_hidden: 128
+    # mean | attention.  Mean pooling divides each branch's contribution by its
+    # token count -- 440 camera tokens against 4096 pillars -- which is the
+    # mechanism behind FINDINGS 4: the gate read pooling statistics, not
+    # sensors, and rose when the camera was removed.  Learned queries let each
+    # branch summarise what matters instead of diluting it.
+    pooling: attention
+    pool_queries: 4
+    # scalar | vector.  A scalar gate can only interpolate between the two
+    # summaries, strictly less expressive than concat's linear merge -- which
+    # is why no_gate scored identically.  Per-dimension keeps the reliability
+    # reading of Eq. 4.8 while letting each feature choose its source.
+    gate_form: vector
+    # Weight of the gate-supervision BCE (0 disables).  Sensor dropout already
+    # manufactures frames whose reliability is known -- a dropped modality
+    # carries zero information -- so the gate is trained toward 0 (camera
+    # dropped) or 1 (LiDAR dropped) on exactly those frames, instead of hoping
+    # the meaning emerges.  FINDINGS 4 measured that it does not emerge.
+    gate_supervision: 0.3
+    # none | film.  Zero-initialised feature-wise modulation of both branches
+    # by the ego state, so perception can look further ahead at speed and
+    # toward the turn at a junction.  At step 0 it is exactly the identity, so
+    # any difference from the unconditioned model is learned, not initial.
+    ego_cond: film
   decoder:
     hidden_dim: 256
     horizon: 4                    # T waypoints
@@ -38,7 +63,11 @@ model:
     # pooled | query.  "pooled" is the original mean-pool into a GRU; "query"
     # lets learned planning queries read the fused tokens directly and adds a
     # target-speed head, removing the spatial bottleneck before the trajectory.
-    readout: pooled
+    # The pooled readout averages 4500 spatial tokens into one 256-d vector
+    # before anything decides the trajectory -- the car to be avoided and the
+    # empty lane beside it arrive as the same average, and every fusion
+    # ablation funnels through the same pipe, which is why Table 5-5 is flat.
+    readout: query
     # Fraction of training samples for which the speedometer is withheld and a
     # learned "unknown" token stands in.  Measured on the run trained without
     # it: holding the scene fixed and sweeping the speed input from 0 to 6 m/s
@@ -51,11 +80,19 @@ model:
     speed_bins: [0.0, 2.0, 4.0, 6.0, 8.0]
   aux:
     bev_seg: true                 # ablation switch
-    bev_classes: 6                # road, lane-marking, vehicle, pedestrian, obstacle, free
+    # 5 for the published set (0 free, 1 road, 2 lane, 3 vehicle, 4 pedestrian
+    # -- what decode_topdown emits; >= 5 is also what makes the adapter decode
+    # the agent channels and the driving agent brake on the predicted vehicle
+    # distance).  The own collection additionally writes 5 = static obstacle,
+    # so training with data.source: own needs 6 here.
+    bev_classes: 5
     depth: true
 
 train:
-  epochs: 60
+  # ~45 min/epoch on the published set at stride 1; 30 epochs is about a day
+  # with validation, which is what the shared card actually absorbs.  The
+  # cosine schedule anneals to zero at whatever this is set to.
+  epochs: 30
   # Effective batch is 128 (Table 5-2), reached by accumulation. A true 128
   # peaks at 36.4 GiB of the card's 39.5 with the mean-pool readout and OOM'd at
   # epoch 7 on a dense point cloud; the query readout does not fit at 128 at all.
@@ -92,7 +129,10 @@ train:
   # fragmented host memory badly enough to halve throughput.  See train.py.
   pin_memory: false
   log_every: 50
-  ckpt_dir: checkpoints/egca
+  # A new directory per architecture revision: the v2 switches above change the
+  # state-dict shape, so letting this run resume from or overwrite the v1
+  # checkpoints would either crash or destroy the runs the thesis reports.
+  ckpt_dir: checkpoints/egca_v2
 
 control:
   lateral:  {kp: 1.25, ki: 0.75, kd: 0.30, window: 20}
@@ -123,8 +163,10 @@ control:
 data:
   # own | transfuser.  "own" is the collected dataset below; "transfuser" reads
   # the published dataset the baselines were trained on, which is what makes the
-  # comparison in Chapter 5 a measurement rather than a citation.
-  source: own
+  # comparison in Chapter 5 a measurement rather than a citation.  transfuser is
+  # the default because it is what the next run trains on; own was the binding
+  # constraint (validation flattened at epoch 12 on 137k frames).
+  source: transfuser
   transfuser_root: ~/transfuser/data
   # Rebuild the waypoint target from the pose the car actually reached rather
   # than the block stored with the frame.  See transfuser_dataset.__init__ for

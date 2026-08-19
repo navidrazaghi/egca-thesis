@@ -44,7 +44,13 @@ def test_fusion_modes():
     ds = CarlaDrivingDataset(base, [], synthetic_len=4)
     batch = collate([ds[i] for i in range(2)])
     for mode in EGCAFusion.MODES:
-        cfg = load_config("configs/egca.yaml", [f"model.fusion.mode={mode}"])
+        # The ablation family was trained on the classic pooled/GRU path; late
+        # fusion has no single fused token set, so readout=query refuses it by
+        # design and the classic switches are restored here on purpose.
+        cfg = load_config("configs/egca.yaml",
+                          [f"model.fusion.mode={mode}",
+                           "model.decoder.readout=pooled",
+                           "model.fusion.goal_injection=decoder"])
         model = EGCAPolicy(cfg, sensor_dropout=0.15).train()
         criterion = UncertaintyWeightedLoss(True, True)
         out = model(batch)
@@ -78,15 +84,32 @@ def test_training():
     assert ret == 0, "training script failed"
 
 
+def test_gate_supervision():
+    print("3c. Gate supervision (FINDINGS 4 repair)...")
+    cfg = load_config("configs/egca.yaml", [])
+    model = EGCAPolicy(cfg, sensor_dropout=0.15).train()
+    criterion = UncertaintyWeightedLoss(
+        True, True, gate_supervision=float(cfg.model.fusion.gate_supervision))
+    ds = CarlaDrivingDataset(cfg, [], synthetic_len=4)
+    batch = collate([ds[i] for i in range(2)])
+    # force_drop marks every sample camera-dropped, so the BCE term must appear
+    out = model(batch, force_drop="cam")
+    loss, parts = criterion(out, batch)
+    assert "gate" in parts, "gate supervision did not fire on a forced drop"
+    loss.backward()
+    print(f"   gate BCE on forced camera drop: {parts['gate']:.3f}")
+
+
 def test_control():
     print("5. PID controller...")
     cfg = load_config("configs/egca.yaml", [])
     ctrl = WaypointController(cfg.control, wp_dt=0.5)
     import numpy as np
     wps = np.array([[2.0, 0.1], [4.0, 0.2], [6.0, 0.3], [8.0, 0.4]])
-    steer, throttle, brake = ctrl.step(wps, speed=3.0)
+    steer, throttle, brake, reverse = ctrl.step(wps, speed=3.0)
     assert -1.0 <= steer <= 1.0
     assert 0.0 <= throttle <= 1.0
+    assert not reverse, "fresh controller must not start in reverse"
     print(f"   steer={steer:.3f}, throttle={throttle:.3f}, brake={brake}")
 
 
@@ -112,6 +135,7 @@ if __name__ == "__main__":
     test_model()
     test_forward()
     test_fusion_modes()
+    test_gate_supervision()
     test_loss()
     test_control()
     test_metrics()

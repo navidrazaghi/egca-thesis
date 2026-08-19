@@ -137,6 +137,11 @@ def main():
     # Validation comes from held-out routes of the training towns; the unseen
     # town is never touched here (see CarlaDrivingDataset).
     source = getattr(cfg.data, "source", "own")
+    # Synthetic smoke runs are served by CarlaDrivingDataset regardless of the
+    # configured source: the point of --synthetic is to exercise the model and
+    # the loop on a machine that has neither dataset on disk.
+    if args.synthetic:
+        source = "own"
     if source == "transfuser":
         # The published dataset the baselines were trained on: 258,866 frames
         # over 488 routes and 8 towns, against 137k over ~50 routes here. Split
@@ -218,7 +223,10 @@ def main():
     criterion = UncertaintyWeightedLoss(
         cfg.model.aux.bev_seg, cfg.model.aux.depth,
         wp_dt=cfg.model.decoder.wp_dt,
-        speed_bins=getattr(cfg.model.decoder, "speed_bins", None)).to(device)
+        speed_bins=getattr(cfg.model.decoder, "speed_bins", None),
+        # getattr: configs stored in checkpoints predate this key
+        gate_supervision=float(getattr(cfg.model.fusion,
+                                       "gate_supervision", 0.0))).to(device)
     params = list(model.parameters()) + list(criterion.parameters())
     optimizer = torch.optim.Adam(params, lr=cfg.train.lr,
                                  weight_decay=cfg.train.weight_decay)

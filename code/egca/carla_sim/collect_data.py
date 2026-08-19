@@ -156,7 +156,15 @@ class DataCollector:
     def _bev_px(self, x, y):
         """Ego-frame metres -> (row, col) of the BEV raster.  Rows increase
         forward-to-backward so that the image is a top-down view with the ego
-        vehicle at the bottom centre, matching the LiDAR pseudo-image."""
+        vehicle at the bottom centre.
+
+        This is the *opposite* row order to the LiDAR pillar canvas, whose
+        row 0 is the ego's own cell -- an earlier version of this comment
+        claimed they matched, and the segmentation head trained against a
+        vertically mirrored target for every run before the flip in
+        BEVSegHead.forward reconciled the two. The on-disk convention stays
+        as it is (ego on the bottom edge, like any top-down picture); the
+        model flips its token grid once, in one documented place."""
         n = self.BEV_GRID
         col = (y - self.BEV_Y[0]) / (self.BEV_Y[1] - self.BEV_Y[0]) * n
         row = n - (x - self.BEV_X[0]) / (self.BEV_X[1] - self.BEV_X[0]) * n

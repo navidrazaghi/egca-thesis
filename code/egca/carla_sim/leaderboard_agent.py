@@ -56,7 +56,7 @@ from egca.config import Cfg, load_config
 from egca.control.pid import WaypointController
 from egca.models import EGCAPolicy
 from egca.models.lidar_encoder import pillarize
-from egca.carla_sim.sensors import CAM_FOV, CAM_H, CAM_W, stitch_cameras
+from egca.carla_sim.sensors import CAM_FOV, CAM_H, CAM_W, CAMERAS, stitch_cameras
 
 EARTH_RADIUS = 6378137.0
 GOAL_DISTANCE = 8.0        # must match PrivilegedExpert.GOAL_DISTANCE
@@ -147,8 +147,17 @@ class EGCAAgent(AutonomousAgent):
     # ---------------------------------------------------------------- sensors
     def sensors(self):
         """Exactly the rig of Appendix B: three 60-degree cameras stitched to a
-        704 x 160 strip, one LiDAR, plus GNSS/IMU/speedometer for localization."""
-        cams = [("rgb_left", -55.0), ("rgb_front", 0.0), ("rgb_right", 55.0)]
+        704 x 160 strip, one LiDAR, plus GNSS/IMU/speedometer for localization.
+
+        The yaws come from sensors.CAMERAS rather than being written here again.
+        When that list moved from +-55 to +-60 to match the published dataset's
+        seamless tiling, this copy kept the old values, so every evaluation ran
+        with 5 deg of duplicated seam per side and both side segments rotated
+        5 deg towards the centre -- a rig the network was never trained on, on
+        every frame, undetectable by open-loop error. One list, one rig.
+        """
+        cams = [("rgb_left", CAMERAS[0][1]), ("rgb_front", CAMERAS[1][1]),
+                ("rgb_right", CAMERAS[2][1])]
         out = [{"type": "sensor.camera.rgb", "x": 1.3, "y": 0.0, "z": 2.3,
                 "roll": 0.0, "pitch": 0.0, "yaw": yaw,
                 "width": CAM_W, "height": CAM_H, "fov": CAM_FOV, "id": name}

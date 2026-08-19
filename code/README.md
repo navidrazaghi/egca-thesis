@@ -219,12 +219,52 @@ route completion 17.5. It fails by colliding — 3.92 vehicle collisions per rou
 — and 26 of 36 routes end "blocked" because a collision wedges the car and the
 controller holds throttle against it until the 180 s timeout.
 
-Three fixes are implemented and committed but **not yet trained or evaluated**:
-agent classes in the auxiliary BEV target (`bev_classes: 5`), braking on the
-predicted vehicle distance, and reversing out of a wedge.
+An external review of the architecture then found two defects that had been
+present in every run so far, both invisible to open-loop error:
 
-Full detail, with the measurement behind every number, is in
-[docs/FINDINGS.md](../docs/FINDINGS.md).
+- **The auxiliary BEV target was vertically mirrored against the LiDAR token
+  grid** (findings 7): the pillar canvas puts the ego at row 0, both BEV
+  targets put it on the bottom edge, and a deconvolutional head cannot learn a
+  global flip. The supervision TransFuser measured as worth 14 RC was
+  geometrically inconsistent for every run — which is also why `no_aux` sat
+  inside the seed spread. Repaired with one flip in `BEVSegHead.forward`.
+- **The evaluation agent kept the ±55° camera yaws** after the rig moved to
+  ±60° (findings 8), so every closed-loop score was driven on a panorama the
+  network was never trained on. The agent now reads the yaws from
+  `sensors.CAMERAS`.
+
+### What the next run trains (v2)
+
+`configs/egca.yaml` now switches on, in one revision, the mechanisms each
+diagnosed failure calls for — every one already motivated by a measurement in
+[docs/FINDINGS.md](../docs/FINDINGS.md):
+
+| switch | replaces | because |
+|---|---|---|
+| `readout: query` + `goal_injection: fusion` | mean-pool → GRU | the 256-d pooled bottleneck erased spatial structure before planning and flattened the ablation table (findings 5) |
+| target-speed head (comes with `query`) | speed from waypoint spacing | breaks the loop that made a standstill self-sustaining |
+| `pooling: attention` | mean pooling into the gate | the gate read token-count statistics, not sensors (findings 4) |
+| `gate_form: vector` | scalar gate | a convex scalar mix is strictly weaker than concat's merge, which is why `no_gate` tied |
+| `gate_supervision: 0.3` | emergent gate semantics | sensor dropout manufactures frames whose reliability is known; the gate is now trained on them |
+| `ego_cond: film` | ego state at the decoder only | perception can look further ahead at speed and toward the turn; zero-initialised, so step 0 is the unconditioned model |
+| `bev_classes: 5` + BEV row flip | 3-class, mirrored target | vehicles enter the auxiliary target, aligned cell-for-cell (findings 6, 7) |
+| brake-on-BEV + unstick reverse (controller) | raw-LiDAR hazard box only | the collision rate is the one lever that moves both terms of DS |
+
+Train it with the default config; evaluate with
+`configs/agent_egca_v2.json`:
+
+```bash
+python -m egca.training.train --config configs/egca.yaml
+```
+
+(`data.source: transfuser` and `ckpt_dir: checkpoints/egca_v2` are already the
+config's defaults, so the v1 checkpoints cannot be overwritten by accident.)
+
+`camera_space: image` and `attention: linear` stay: the BEV projection's
+geometry is only verified for the collection rig, not the published one, and
+un-verified geometry is how findings 2 happened; linear attention is the
+thesis's efficiency claim, held at its measured trade-off (0.135 vs 0.123
+open-loop).
 
 ### What has been ruled out
 

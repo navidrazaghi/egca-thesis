@@ -29,8 +29,15 @@ proposed method against the reference expert in the same chain, and ablations
 against each other.
 
 The policy drives — two routes completed outright, six above 50% — and fails by
-colliding, 3.92 vehicle collisions per route. Three fixes for that are
-implemented and committed but not yet trained or evaluated.
+colliding, 3.92 vehicle collisions per route. An architecture review then found
+two further defects present in every run so far: the auxiliary BEV target was
+vertically mirrored against the LiDAR token grid it supervises, and the
+evaluation agent was still spawning the pre-correction ±55° camera rig. Both
+are fixed, and `configs/egca.yaml` now trains the revised architecture — query
+readout with a target-speed head, attention pooling, a supervised per-dimension
+gate, FiLM ego conditioning, and vehicles in the (now aligned) auxiliary
+target. See [code/README.md](code/README.md#what-the-next-run-trains-v2) for
+the run; nothing below reports its numbers yet.
 
 ---
 
@@ -56,7 +63,9 @@ Start with [`code/README.md`](code/README.md) to run anything.
 that produced it. The harness validation, four train/deploy convention
 mismatches, a supervision target that is wrong on exactly the frames deciding
 closed-loop behaviour, a reliability gate that responds to pooling statistics
-rather than sensors, and two dead ends recorded so they are not retried.
+rather than sensors, an auxiliary BEV target mirrored against the token grid,
+a camera rig correction that never reached the evaluation agent, and two dead
+ends recorded so they are not retried.
 
 **[docs/EVALUATION.md](docs/EVALUATION.md)** — how to run the benchmark, why
 Longest6 needs the `*_local.py` evaluator, the screening protocol for cheap

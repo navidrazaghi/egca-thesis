@@ -208,31 +208,48 @@ class EGCAFusion(nn.Module):
         modality being chosen uniformly.  Both modalities are therefore never
         dropped simultaneously, and each is dropped with probability rho/2.
         `force` in {None, 'cam', 'lidar'} lets the evaluation code simulate a
-        hard sensor failure deterministically."""
+        hard sensor failure deterministically.
+
+        Also returns which samples were dropped, as two B-length bool masks
+        (cam dropped, lidar dropped). The measurement in FINDINGS 4 showed the
+        gate does not discover sensor reliability on its own -- it reads
+        pooling statistics -- and the dropout already manufactures frames
+        whose reliability is *known*: a dropped modality has, by construction,
+        zero information. Returning the masks lets the loss supervise the gate
+        on exactly those frames instead of hoping the meaning emerges."""
+        n = fc.shape[0] if fc is not None else fl.shape[0]
+        dev = fc.device if fc is not None else fl.device
+        no_drop = torch.zeros(n, dtype=torch.bool, device=dev)
         if force is None:
             if not (self.training and self.rho > 0):
-                return fc, fl
-            n = fc.shape[0]
-            dev = fc.device
+                return fc, fl, no_drop, no_drop
             drop = torch.rand(n, device=dev) < self.rho          # b_m ~ Bern(rho)
             pick_cam = torch.rand(n, device=dev) < 0.5           # uniform choice
             mc = (drop & pick_cam).view(n, 1, 1)
             ml = (drop & ~pick_cam).view(n, 1, 1)
             fc = torch.where(mc, self.absent_cam.expand_as(fc), fc)
             fl = torch.where(ml, self.absent_lidar.expand_as(fl), fl)
-            return fc, fl
+            return fc, fl, mc.view(n), ml.view(n)
         if force == "cam":
             fc = self.absent_cam.expand_as(fc).clone()
+            return fc, fl, ~no_drop, no_drop
         elif force == "lidar":
             fl = self.absent_lidar.expand_as(fl).clone()
-        return fc, fl
+            return fc, fl, no_drop, ~no_drop
+        return fc, fl, no_drop, no_drop
 
     def forward(self, fc, fl, force_drop=None, ego=None, goal=None):
         """Returns (context, gate, aux tokens, final tokens, per-modality
-        summaries).  The last item is only used by the `late` ablation, which
-        decodes each modality separately."""
+        summaries, drop masks).  The per-modality summaries are only used by
+        the `late` ablation, which decodes each modality separately; the drop
+        masks feed the gate-supervision loss."""
         if not self.single:
-            fc, fl = self.drop_modality(fc, fl, force=force_drop)
+            fc, fl, drop_cam, drop_lidar = self.drop_modality(
+                fc, fl, force=force_drop)
+        else:
+            n = fc.shape[0] if fc is not None else fl.shape[0]
+            dev = fc.device if fc is not None else fl.device
+            drop_cam = drop_lidar = torch.zeros(n, dtype=torch.bool, device=dev)
         n_extra = 0
         if self.goal_token and goal is not None:
             g_tok = self.goal_embed(goal).unsqueeze(1)          # B x 1 x d
@@ -288,4 +305,4 @@ class EGCAFusion(nn.Module):
             if out_l is not None:
                 out_l = (1.0 - gg) * out_l
         g_report = g.mean(dim=-1) if g.shape[-1] > 1 else g.squeeze(-1)
-        return z, g_report, aux, (out_c, out_l), (zc, zl)
+        return z, g_report, aux, (out_c, out_l), (zc, zl), (drop_cam, drop_lidar)

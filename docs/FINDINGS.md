@@ -167,10 +167,16 @@ This also explains the ablation beside it: `no_gate` scores 0.136 against 0.135
 for the full model, inside the 0.003 seed spread. A gate carrying no signal is
 exactly what that row should look like.
 
-Two repairs follow from the diagnosis and are listed as future work: replace mean
-pooling with the query readout so neither branch's contribution depends on how
-many tokens it emits, and supervise the gate against known sensor quality instead
-of hoping it emerges.
+Two repairs follow from the diagnosis, and both are now implemented and
+switched on in `configs/egca.yaml` (untrained as of this writing): attention
+pooling (`pooling: attention`), so neither branch's contribution depends on how
+many tokens it emits, and direct gate supervision (`gate_supervision: 0.3`) —
+sensor dropout already manufactures frames whose reliability is known by
+construction, so on exactly those frames the gate is trained toward the
+modality that still carries information, instead of hoping the meaning
+emerges. The gate is also per-dimension now (`gate_form: vector`): a scalar
+convex mix is strictly less expressive than the `concat` ablation's linear
+merge, which is the other half of why `no_gate` tied.
 
 ---
 
@@ -267,7 +273,60 @@ no such problem — its geometry was already established against the LiDAR.
 
 ---
 
-## 7. Two dead ends, recorded so they are not retried
+## 7. The auxiliary BEV target was vertically mirrored against the token grid
+
+Found by an external review of the index arithmetic rather than by a
+measurement, and then checked against one: the two conventions are both
+written in this repository, three files apart.
+
+The LiDAR pillar canvas indexes rows by `ix = (x - x0) / pillar_size` — row 0
+is the cell the ego stands on, the last row is 32 m ahead. Both BEV targets
+are written the other way up: `collect_data._bev_px` computes
+`row = n - (x - x0)/(x1 - x0) * n`, and `decode_topdown`'s crop (the one
+measured at 0.434 against LiDAR) puts x = 32 m at row 0 and the ego on the
+bottom edge. Same columns, opposite rows.
+
+`BEVSegHead` is a deconvolution — translation-equivariant, unable to express
+a global flip — and the LiDAR branch has no intra-modal attention to route
+information across the grid. So the head was asked to predict, at each token,
+the class of the cell mirrored fore-aft about the grid centre. Roads are
+often fore-aft symmetric over 32 m, which is why the seg loss still fell; the
+vehicle class, the entire point of finding 6's repair, is not.
+
+This retroactively explains a row that had been left unexplained: `no_aux`
+scores 0.140 against the full model's 0.137, inside noise, where TransFuser
+measured the same auxiliary supervision as worth 14 points of route
+completion. An auxiliary target that is geometrically inconsistent with the
+tokens it supervises carries almost no usable signal — and what does leak
+through cross-attention teaches the tokens to describe the wrong end of the
+road.
+
+**The repair is one flip in one place**: `BEVSegHead.forward` reverses the
+token rows before the deconvolution, so input and target align cell-for-cell
+and the head's output stays in the target's own convention — which is what
+the agent's `_bev_vehicle_distance` already assumes when converting rows back
+to metres. The on-disk formats are untouched.
+
+---
+
+## 8. The evaluation agent kept the old camera yaws after the rig was corrected
+
+When the camera rig was corrected for the published dataset (finding 2), the
+yaws moved from ±55° to ±60° in `sensors.CAMERAS` — but
+`leaderboard_agent.sensors()` carried its own copy of the list, and that copy
+kept ±55°. Every closed-loop score so far, including the DS 4.10 headline,
+was therefore driven with 5° of duplicated seam per side and both side
+segments rotated 5° toward the centre: a projection the network was never
+trained on, on every frame, invisible to open-loop error for the usual
+reason.
+
+The agent now reads the yaws from `sensors.CAMERAS`. One list, one rig. The
+lesson is finding 2's, repeated because it repeated: a convention that lives
+in two places will eventually be two conventions.
+
+---
+
+## 9. Two dead ends, recorded so they are not retried
 
 **Aggressive creeping.** A 3 s threshold instead of 55 s: 21 paired routes gave
 RC 18.6 against 20.7. The hazard interlock correctly refuses to creep into dense
