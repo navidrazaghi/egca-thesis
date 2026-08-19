@@ -18,7 +18,9 @@ EGCA is an end-to-end imitation learning policy for urban autonomous driving tha
 - Uses a **sensor-reliability gate** to weight modalities (Eqs. 4.7-4.9, Sec. 4-3-2)
 - Applies **modality-level sensor dropout** during training for robustness (Eq. 4.15)
 - Predicts waypoints via a **GRU decoder** with multi-task auxiliary supervision (BEV segmentation, depth)
-- Achieves **DS = 55.8** on CARLA Longest6, outperforming TransFuser/InterFuser/ReasonNet (Table 5-3)
+- Is evaluated closed-loop on **CARLA Longest6** against the reference privileged
+  expert run through the same chain (see [Status](#status) — the published
+  baselines are **not** re-run here and no claim of superiority is made)
 
 ---
 
@@ -189,26 +191,56 @@ code/
 
 ---
 
-## Key Results (Thesis Chapter 5)
+## Status
 
-| **Metric**        | **EGCA** | TransFuser | InterFuser | ReasonNet |
-|-------------------|----------|------------|------------|-----------|
-| Driving Score ↑   | **55.8** | 47.1       | 49.4       | 52.7      |
-| Route Completion ↑| **86.9** | 79.6       | 81.4       | 84.2      |
-| Infraction Score ↑| **0.66** | 0.59       | 0.61       | 0.63      |
+Work in progress. The numbers below are what has actually been measured in this
+chain; nothing is quoted from a paper and nothing is a projection.
 
-*(Table 5-3, CARLA Longest6 benchmark)*
+| run | routes | DS | RC | IS |
+|---|---|---|---|---|
+| privileged expert (reference agent, our chain) | 36 | 64.03 | 73.38 | 0.884 |
+| `tf_base_rl` — relabelled targets | 34 | 4.10 | 29.25 | 0.250 |
+| `concat` ablation | 30 | 2.54 | 21.16 | 0.324 |
 
-**Weather robustness:** EGCA degrades by **15.9%** in out-of-distribution hard rain at
-night, vs. **27.9%** for TransFuser (Table 5-4).
+The same expert scores 74.49 / 82.71 / 0.89 in its own publication. The
+infraction score reproduces to 0.006; route completion does not, because this
+work runs CARLA 0.9.14 against the reference's 0.9.10.1 and the rewritten traffic
+manager deadlocks more often in dense traffic. Every agent in this chain carries
+that handicap, which is why scores are reported beside the expert rather than
+beside published figures.
 
-**Sensor robustness:** at a 50% LiDAR frame-drop EGCA keeps DS = 45.7, above the
-camera-only floor of 37.7, while TransFuser collapses to 26.1 (Fig. 5-4).
+The last two rows are **not comparable with each other** — different dataset,
+different epoch budget.
 
-**Efficiency:** versus the *same* architecture with full softmax attention, the linear
-form is statistically indistinguishable in DS (55.8 vs 53.9, below the 3.2-point
-significance threshold) while cutting fusion-module cost by 40% and end-to-end
-latency by 13%.
+### Where it stands
+
+The policy drives: two Longest6 routes completed outright, six above 50%, median
+route completion 17.5. It fails by colliding — 3.92 vehicle collisions per route
+— and 26 of 36 routes end "blocked" because a collision wedges the car and the
+controller holds throttle against it until the 180 s timeout.
+
+Three fixes are implemented and committed but **not yet trained or evaluated**:
+agent classes in the auxiliary BEV target (`bev_classes: 5`), braking on the
+predicted vehicle distance, and reversing out of a wedge.
+
+Full detail, with the measurement behind every number, is in
+[docs/FINDINGS.md](../docs/FINDINGS.md).
+
+### What has been ruled out
+
+Aggressive creeping (RC 18.6 against 20.7 over 21 paired routes) and speed
+dropout (reliance 0.85 → 0.76 over a full 25-epoch run, standstill intact). Both
+treated symptoms of a supervision-target defect described in the findings.
+
+The sensor-reliability gate does not behave as designed: removing the camera
+entirely moves it *up*, because it reads mean-pooled summaries diluted by token
+count rather than sensor quality. Reported as a negative result rather than
+restated more carefully.
+
+Linear attention removes 92% of the fusion operator's multiply-accumulates
+(7.38 → 0.59 GMAC) at a measured cost in open-loop waypoint accuracy — 0.135
+against 0.123 for full attention, four times the 0.003 seed spread. The claim is
+a quantified trade-off, not equivalence.
 
 ---
 
