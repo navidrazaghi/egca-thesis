@@ -24,6 +24,12 @@ code/inspect*/
 # Versioned exports written by export_pdf.py alongside the tracked
 # Razaghi_MSc_Thesis.docx, which is the one that gets committed.
 Razaghi_MSc_Thesis_v*.docx
+Razaghi_MSc_Thesis_v*.pdf
+
+# ...but the current thesis is tracked in both formats. *.pdf above ignores
+# every PDF, so this one is exempted explicitly; it is the readable deliverable
+# and a reader should not have to run a Word build to see the document.
+!Razaghi_MSc_Thesis.pdf
 
 # Recordings and screenshots kept in the working folder. Root-level only, so
 # figs/ and template_unpacked/word/media/ are untouched.
