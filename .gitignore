@@ -17,3 +17,6 @@ dryrun*/
 code/dryrun*/
 inspect*/
 code/inspect*/
+
+# local editor/tool settings
+.claude/
