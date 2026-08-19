@@ -20,3 +20,13 @@ code/inspect*/
 
 # local editor/tool settings
 .claude/
+
+# Versioned exports written by export_pdf.py alongside the tracked
+# Razaghi_MSc_Thesis.docx, which is the one that gets committed.
+Razaghi_MSc_Thesis_v*.docx
+
+# Recordings and screenshots kept in the working folder. Root-level only, so
+# figs/ and template_unpacked/word/media/ are untouched.
+/*.mp4
+/*.m4a
+/*.png
